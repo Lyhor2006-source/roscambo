@@ -6,9 +6,64 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: macos-13
+  build-fast-linux:
+    name: Fast iOS Build (Ubuntu Cloud)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
+      - name: Install Clang & Build Tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang lld llvm curl git make
+
+      - name: Download Apple iOS SDK
+        run: |
+          echo "[*] Downloading Apple iOS 14.5 SDK..."
+          git clone --depth 1 https://github.com/theos/sdks.git ~/sdks
+          ls -la ~/sdks/iPhoneOS14.5.sdk
+
+      - name: Install ldid
+        run: |
+          sudo apt-get install -y libssl-dev
+          git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ~/ldid
+          cd ~/ldid && make && sudo cp ldid /usr/local/bin/ && cd -
+          ldid -v || true
+
+      - name: Cross-Compile roscheat.dylib
+        run: |
+          echo "[*] Compiling roscheat.dylib for arm64..."
+          clang++ -target arm64-apple-ios14.0 \
+            -isysroot ~/sdks/iPhoneOS14.5.sdk \
+            -O3 -std=c++17 -fno-objc-arc \
+            -I. -I./imgui -I./imgui/backends \
+            -shared -fPIC -fuse-ld=lld \
+            -framework UIKit -framework Metal -framework MetalKit \
+            -framework QuartzCore -framework Foundation \
+            -o roscheat.dylib \
+            RosCheatMetal.mm \
+            imgui/imgui.cpp \
+            imgui/imgui_draw.cpp \
+            imgui/imgui_tables.cpp \
+            imgui/imgui_widgets.cpp \
+            imgui/backends/imgui_impl_metal.mm
+
+          strip -x roscheat.dylib || true
+          ldid -S roscheat.dylib || true
+          ls -lh roscheat.dylib
+          file roscheat.dylib || true
+
+      - name: Upload roscheat.dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RosCambo-iOS-Cheat-Dylib
+          path: roscheat.dylib
+
+  build-macos:
+    name: macOS Runner Build
+    runs-on: macos-13
+    continue-on-error: true
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -17,35 +72,11 @@ jobs:
         run: |
           sudo xcode-select -switch /Applications/Xcode.app
           brew install ldid
-
-      - name: Compile roscheat.dylib
-        run: |
           make
           ls -lh roscheat.dylib
-
-      - name: Setup optool & Inject if IPA exists
-        run: |
-          git clone --depth 1 https://github.com/alexzielenski/optool.git
-          cd optool
-          xcodebuild -project optool.xcodeproj -target optool -configuration Release
-          sudo cp build/Release/optool /usr/local/bin/
-          cd ..
-          rm -rf optool
-
-          # Check if an IPA exists in root
-          IPA_FILE=$(find . -maxdepth 1 -name "*.ipa" | head -n 1)
-          if [ -n "$IPA_FILE" ]; then
-            echo "[*] Found IPA: $IPA_FILE. Starting injection..."
-            chmod +x inject.sh
-            ./inject.sh "$IPA_FILE" "RoS-Cambo-Modded.ipa"
-          else
-            echo "[*] No IPA in root. Packaging roscheat.dylib only."
-          fi
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: RosCambo-Build-Output
-          path: |
-            roscheat.dylib
-            *.ipa
+          name: RosCambo-macOS-Build
+          path: roscheat.dylib

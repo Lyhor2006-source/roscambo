@@ -1,7 +1,7 @@
 // language: Objective-C++, file: RosCheatMetal.mm, target: iOS arm64
 // =============================================================================
 // Project: RosCambo - Rules of Survival Fan-Made Private Server
-// Module: Metal ImGui Hook + Advanced ESP + Multi-Mode Aimbot (arm64)
+// Module: Metal ImGui Hook + Advanced ESP + Hybrid 50/50 Skill Aimbot (arm64)
 // OFFSETS VERIFIED VIA REA ARM64 DISASSEMBLY (0x100878360 / 0x100878b88)
 // Ghillie Island Ranked Battle Royale Compatible
 // =============================================================================
@@ -21,6 +21,14 @@
 #include "ImGuiTheme.h"
 #include "imgui.h"
 #include "imgui_impl_metal.h"
+
+// Trigger Modes specified by Captain Idris
+enum AimTriggerMode : int {
+    TRIGGER_ALWAYS = 0,         // Always active
+    TRIGGER_SCOPE_ONLY = 1,     // Active only when opening scope (ADS)
+    TRIGGER_FIRING_ONLY = 2,    // Active only when shooting
+    TRIGGER_SCOPE_AND_FIRE = 3  // Active when either scoping or firing
+};
 
 struct RosCheatConfig {
     bool menu_open = true;
@@ -42,9 +50,11 @@ struct RosCheatConfig {
     // Aimbot Features
     bool aimbot_enabled = true;
     int aim_target_bone = BONE_HEAD;
+    int aim_trigger_mode = TRIGGER_ALWAYS; // 0=Always, 1=Scope Only, 2=Firing Only, 3=Scope & Firing
     bool aim_silent = false;
     bool aim_360 = false;
-    int aim_snap_mode = 1; // 0=Custom Smooth, 1=Aim 50% (Legit), 2=Aim 100% (Instant Rage)
+    int aim_snap_mode = 1; // 0=Custom Smooth, 1=Aim 50% (50% Aim + 50% Skill), 2=Aim 100% (Instant Rage)
+    float aim_skill_ratio = 0.50f; // 50% Magnetism / 50% Player Skill
     float aim_fov = 140.0f;
     float aim_smooth = 6.0f;
     bool draw_fov_circle = true;
@@ -56,36 +66,49 @@ struct RosCheatConfig {
 
 static RosCheatConfig g_Cheat;
 
+// Global touch state trackers for weapon fire & scope button detection
+static bool g_IsTouchingFire = false;
+static bool g_IsTouchingScope = false;
+static CGPoint g_LastTouchPos = CGPointZero;
+static CGPoint g_TouchDelta = CGPointZero;
+
 // =============================================================================
 // VERIFIED NEOX SCALABLE ENTITY ITERATOR
 // Iterates through verified std::unordered_map at client_app + 0xf70
 // =============================================================================
 class RosGameScanner {
 public:
-    static bool FetchState(std::vector<RosPlayer>& out_players, Vector3& out_local_pos, int& out_local_team, Matrix4x4& out_vp, float& out_camera_yaw) {
+    static bool FetchState(std::vector<RosPlayer>& out_players, Vector3& out_local_pos, int& out_local_team, Matrix4x4& out_vp, float& out_camera_yaw, bool& out_is_firing, bool& out_is_scoped) {
         out_players.clear();
+        out_is_firing = g_IsTouchingFire;
+        out_is_scoped = g_IsTouchingScope;
+
         uintptr_t base = MemoryEngine::GetBaseAddress();
         if (!base) return false;
 
-        // ClientApp instance discovered via ADRP+ADD at 0x1008783e0
         uintptr_t client_app = MemoryEngine::Read<uintptr_t>(base + 0x3B20000);
         if (!MemoryEngine::IsValidAddress(client_app)) return false;
 
-        // Camera object containing ViewProjection matrix
         uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
         if (MemoryEngine::IsValidAddress(camera_obj)) {
             out_vp = MemoryEngine::Read<Matrix4x4>(camera_obj + 0x180);
             out_camera_yaw = MemoryEngine::Read<float>(camera_obj + 0x210);
+            float fov = MemoryEngine::Read<float>(camera_obj + 0x218);
+            if (fov > 0.0f && fov < 55.0f) {
+                out_is_scoped = true; // Scope zoom detected in camera
+            }
         }
 
-        // Local Player Pointer verified at client_app + 0xf98
         uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_LOCAL_PLAYER_PTR);
         if (MemoryEngine::IsValidAddress(local_player)) {
             out_local_pos = MemoryEngine::Read<Vector3>(local_player + NeoXOffsets::ENTITY_COORDS);
             out_local_team = MemoryEngine::Read<int>(local_player + NeoXOffsets::ENTITY_TEAM);
+            bool mem_fire = MemoryEngine::Read<bool>(local_player + 0x1F8);
+            bool mem_scope = MemoryEngine::Read<bool>(local_player + 0x1F9);
+            if (mem_fire) out_is_firing = true;
+            if (mem_scope) out_is_scoped = true;
         }
 
-        // Entity Map verified at client_app + 0xf70 / 0xf78
         uintptr_t bucket_array = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_ENTITY_BUCKETS);
         size_t bucket_count = MemoryEngine::Read<size_t>(client_app + NeoXOffsets::CLIENTAPP_BUCKET_COUNT);
 
@@ -93,7 +116,6 @@ public:
             return false;
         }
 
-        // Walk LLVM libc++ unordered_map buckets
         for (size_t i = 0; i < bucket_count; ++i) {
             uintptr_t node = MemoryEngine::Read<uintptr_t>(bucket_array + (i * sizeof(uintptr_t)));
             while (MemoryEngine::IsValidAddress(node)) {
@@ -116,7 +138,6 @@ public:
                         p.distance = out_local_pos.Distance(p.position);
 
                         if (p.distance <= g_Cheat.max_esp_distance) {
-                            // ModelSkeletal & Bone array
                             uintptr_t model_skeletal = MemoryEngine::Read<uintptr_t>(ent + NeoXOffsets::ENTITY_SKELETAL_MODEL);
                             if (MemoryEngine::IsValidAddress(model_skeletal)) {
                                 uintptr_t bone_array = MemoryEngine::Read<uintptr_t>(model_skeletal + NeoXOffsets::SKELETAL_BONE_ARRAY);
@@ -179,6 +200,10 @@ static void DrawCornerBox(ImDrawList* drawList, float x, float y, float w, float
     drawList->AddLine(ImVec2(x + w, y + h), ImVec2(x + w, y + h - line_h), color, thickness);
 }
 
+// =============================================================================
+// HYBRID 50/50 SKILL + AIMBOT EXECUTION ENGINE
+// Blends 50% Magnetic Aim Assistance with 50% Player Touch Skill
+// =============================================================================
 static void ExecuteAimbot(const RosPlayer& target, const Vector2& screen_target, float screen_w, float screen_h) {
     Vector2 center(screen_w * 0.5f, screen_h * 0.5f);
     float delta_x = screen_target.x - center.x;
@@ -188,12 +213,20 @@ static void ExecuteAimbot(const RosPlayer& target, const Vector2& screen_target,
     float step_y = 0.0f;
 
     if (g_Cheat.aim_snap_mode == 2) {
+        // Aim 100%: Instant Rage Snap
         step_x = delta_x;
         step_y = delta_y;
     } else if (g_Cheat.aim_snap_mode == 1) {
-        step_x = delta_x * 0.50f;
-        step_y = delta_y * 0.50f;
+        // Aim 50% (+50% Player Skill):
+        // Applies 50% soft magnetic pull, allowing the player's own finger/recoil control
+        // to complete the aim. Looks completely natural to spectators.
+        float assist_weight = g_Cheat.aim_skill_ratio; // 0.50f
+        float player_touch_factor = (float)g_TouchDelta.x * 0.4f;
+
+        step_x = (delta_x * assist_weight) + player_touch_factor;
+        step_y = (delta_y * assist_weight) + ((float)g_TouchDelta.y * 0.4f);
     } else {
+        // Custom Smooth
         float smooth = std::max(1.0f, g_Cheat.aim_smooth);
         step_x = delta_x / smooth;
         step_y = delta_y / smooth;
@@ -224,6 +257,22 @@ static void ExecuteAimbot(const RosPlayer& target, const Vector2& screen_target,
     }
 }
 
+// Trigger condition validator
+static bool IsAimbotTriggerConditionMet(bool is_firing, bool is_scoped) {
+    switch (g_Cheat.aim_trigger_mode) {
+        case TRIGGER_ALWAYS:
+            return true;
+        case TRIGGER_SCOPE_ONLY:
+            return is_scoped;
+        case TRIGGER_FIRING_ONLY:
+            return is_firing;
+        case TRIGGER_SCOPE_AND_FIRE:
+            return (is_scoped || is_firing);
+        default:
+            return true;
+    }
+}
+
 static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     float scale = [UIScreen mainScreen].scale;
@@ -248,9 +297,11 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     int local_team = 0;
     Matrix4x4 vp_matrix{};
     float camera_yaw = 0.0f;
+    bool is_firing = false;
+    bool is_scoped = false;
     std::vector<RosPlayer> players;
 
-    RosGameScanner::FetchState(players, local_pos, local_team, vp_matrix, camera_yaw);
+    RosGameScanner::FetchState(players, local_pos, local_team, vp_matrix, camera_yaw, is_firing, is_scoped);
 
     Vector2 center(screenSize.width * 0.5f, screenSize.height * 0.5f);
     float closest_aim_dist = g_Cheat.aim_360 ? 99999.0f : g_Cheat.aim_fov;
@@ -341,12 +392,16 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         }
     }
 
+    // Aimbot Trigger Evaluation
+    bool trigger_active = IsAimbotTriggerConditionMet(is_firing, is_scoped);
+
     if (g_Cheat.aimbot_enabled) {
         if (g_Cheat.draw_fov_circle && !g_Cheat.aim_360) {
-            draw->AddCircle(ImVec2(center.x, center.y), g_Cheat.aim_fov, IM_COL32(0, 229, 255, 140), 64, 1.4f);
+            ImU32 fov_col = trigger_active ? IM_COL32(0, 255, 180, 180) : IM_COL32(0, 229, 255, 100);
+            draw->AddCircle(ImVec2(center.x, center.y), g_Cheat.aim_fov, fov_col, 64, 1.4f);
         }
 
-        if (aim_target != nullptr) {
+        if (aim_target != nullptr && trigger_active) {
             draw->AddLine(ImVec2(center.x, center.y), ImVec2(aim_target_screen.x, aim_target_screen.y), IM_COL32(255, 0, 80, 200), 1.2f);
             ExecuteAimbot(*aim_target, aim_target_screen, screenSize.width, screenSize.height);
         }
@@ -362,7 +417,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     ImGui::End();
 
     if (g_Cheat.menu_open) {
-        ImGui::SetNextWindowSize(ImVec2(480, 340), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(500, 380), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("RosCambo Private Server - Master Suite", &g_Cheat.menu_open, ImGuiWindowFlags_NoCollapse)) {
             if (ImGui::BeginTabBar("Tabs")) {
                 if (ImGui::BeginTabItem("  ESP VISUALS  ")) {
@@ -399,13 +454,20 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                     ImGui::Checkbox("Silent Aim", &g_Cheat.aim_silent);
 
                     ImGui::Separator();
+                    const char* trigger_modes[] = { "Always (Def Always)", "Scope Only", "Firing Only", "Firing & Scope" };
+                    ImGui::Combo("Trigger Condition", &g_Cheat.aim_trigger_mode, trigger_modes, 4);
+
                     const char* bones[] = { "Head", "Neck", "Chest / Spine", "Pelvis" };
                     ImGui::Combo("Target Bone", &g_Cheat.aim_target_bone, bones, 4);
 
-                    const char* snap_options[] = { "Custom Smooth", "Aim 50% (Legit Assist)", "Aim 100% (Instant Rage)" };
+                    ImGui::Separator();
+                    const char* snap_options[] = { "Custom Smooth", "Aim 50% (+50% Player Skill)", "Aim 100% (Instant Rage)" };
                     ImGui::Combo("Aim Speed Preset", &g_Cheat.aim_snap_mode, snap_options, 3);
 
-                    if (g_Cheat.aim_snap_mode == 0) {
+                    if (g_Cheat.aim_snap_mode == 1) {
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[Skill Blend Mode] 50% Magnetism + 50% Touch Skill");
+                        ImGui::SliderFloat("Assistance Ratio", &g_Cheat.aim_skill_ratio, 0.20f, 0.80f, "%.2f Ratio");
+                    } else if (g_Cheat.aim_snap_mode == 0) {
                         ImGui::SliderFloat("Smooth Factor", &g_Cheat.aim_smooth, 1.0f, 30.0f, "%.1f");
                     }
 
@@ -426,6 +488,8 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                     ImGui::Checkbox("Dynamic Terrain Z-Filter", &g_Cheat.ghillie_terrain_filter);
                     ImGui::Text("Status: Synchronized with NeoX SpaceData");
                     ImGui::Text("Area of Interest (AoI) Radius: 500m");
+                    ImGui::Text("Active Firing Trigger: %s", is_firing ? "YES" : "NO");
+                    ImGui::Text("Active Scope Trigger: %s", is_scoped ? "YES" : "NO");
                     ImGui::Text("Entities Loaded in Cell: %lu", players.size());
                     ImGui::EndTabItem();
                 }
@@ -454,21 +518,46 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 }
 
 - (void)ros_sendEvent:(UIEvent *)event {
-    if (s_ImGuiReady && event.type == UIEventTypeTouches) {
-        ImGuiIO& io = ImGui::GetIO();
+    if (event.type == UIEventTypeTouches) {
+        CGSize screenSize = [UIScreen mainScreen].bounds.size;
         NSSet<UITouch*>* touches = [event allTouches];
         for (UITouch* touch in touches) {
             CGPoint loc = [touch locationInView:touch.view];
-            io.MousePos = ImVec2(loc.x, loc.y);
 
-            if (touch.phase == UITouchPhaseBegan) {
-                io.MouseDown[0] = true;
+            if (touch.phase == UITouchPhaseBegan || touch.phase == UITouchPhaseMoved) {
+                // Track finger motion delta for 50/50 Skill Blend
+                g_TouchDelta = CGPointMake(loc.x - g_LastTouchPos.x, loc.y - g_LastTouchPos.y);
+                g_LastTouchPos = loc;
+
+                // Screen region heuristic for fire & scope buttons
+                // Right side: Scope button (top right/mid right) and Fire button (bottom right)
+                // Left side: Left Fire button
+                if (loc.x > screenSize.width * 0.70f && loc.y < screenSize.height * 0.50f) {
+                    g_IsTouchingScope = true;
+                }
+                if ((loc.x > screenSize.width * 0.70f && loc.y > screenSize.height * 0.50f) ||
+                    (loc.x < screenSize.width * 0.35f && loc.y > screenSize.height * 0.40f)) {
+                    g_IsTouchingFire = true;
+                }
             } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
-                io.MouseDown[0] = false;
+                g_IsTouchingFire = false;
+                g_IsTouchingScope = false;
+                g_TouchDelta = CGPointZero;
+            }
+
+            if (s_ImGuiReady) {
+                ImGuiIO& io = ImGui::GetIO();
+                io.MousePos = ImVec2(loc.x, loc.y);
+                if (touch.phase == UITouchPhaseBegan) {
+                    io.MouseDown[0] = true;
+                } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+                    io.MouseDown[0] = false;
+                }
             }
         }
-        if (g_Cheat.menu_open && io.WantCaptureMouse) {
-            return;
+
+        if (s_ImGuiReady && g_Cheat.menu_open && ImGui::GetIO().WantCaptureMouse) {
+            return; // Absorb touch inside ImGui window
         }
     }
     [self ros_sendEvent:event];
@@ -500,5 +589,5 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 @end
 
 __attribute__((constructor)) static void Entry() {
-    NSLog(@"[RosCamboMod] Loaded with 100%% verified ARM64 NeoX offsets.");
+    NSLog(@"[RosCamboMod] Loaded with 50/50 Skill Blend & Multi-Trigger Modes.");
 }
