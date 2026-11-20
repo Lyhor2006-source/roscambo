@@ -70,7 +70,7 @@ inline void ApplyCyberTacticalTheme() {
     colors[ImGuiCol_ResizeGripActive]      = ImVec4(0.00f, 0.90f, 1.00f, 0.95f);
     colors[ImGuiCol_Tab]                   = ImVec4(0.11f, 0.14f, 0.18f, 0.86f);
     colors[ImGuiCol_TabHovered]            = ImVec4(0.00f, 0.75f, 0.90f, 0.80f);
-    colors[ImGuiCol_TabActive]             = ImVec4(0.00f, 0.60f, 0.80f, 1.00f);
-    colors[ImGuiCol_TabUnfocused]          = ImVec4(0.08f, 0.10f, 0.13f, 0.97f);
-    colors[ImGuiCol_TabUnfocusedActive]    = ImVec4(0.12f, 0.16f, 0.20f, 1.00f);
+    colors[ImGuiCol_TabSelected]           = ImVec4(0.00f, 0.60f, 0.80f, 1.00f);
+    colors[ImGuiCol_TabDimmed]             = ImVec4(0.08f, 0.10f, 0.13f, 0.97f);
+    colors[ImGuiCol_TabDimmedSelected]     = ImVec4(0.12f, 0.16f, 0.20f, 1.00f);
 }

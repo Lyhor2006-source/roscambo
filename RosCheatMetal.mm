@@ -464,7 +464,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                     ImGui::Combo("Aim Speed Preset", &g_Cheat.aim_snap_mode, snap_options, 3);
 
                     if (g_Cheat.aim_snap_mode == 1) {
-                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[Skill Blend Mode] 50% Magnetism + 50% Touch Skill");
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "%s", "[Skill Blend Mode] 50% Magnetism + 50% Touch Skill");
                         ImGui::SliderFloat("Assistance Ratio", &g_Cheat.aim_skill_ratio, 0.20f, 0.80f, "%.2f Ratio");
                     } else if (g_Cheat.aim_snap_mode == 0) {
                         ImGui::SliderFloat("Smooth Factor", &g_Cheat.aim_smooth, 1.0f, 30.0f, "%.1f");
