@@ -9,6 +9,7 @@
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #include <vector>
@@ -68,8 +69,8 @@ static RosCheatConfig g_Cheat;
 // Global touch state trackers for weapon fire & scope button detection
 static bool g_IsTouchingFire = false;
 static bool g_IsTouchingScope = false;
-static CGPoint g_LastTouchPos = CGPointZero;
-static CGPoint g_TouchDelta = CGPointZero;
+static CGPoint g_LastTouchPos = { 0.0f, 0.0f };
+static CGPoint g_TouchDelta = { 0.0f, 0.0f };
 
 // =============================================================================
 // VERIFIED NEOX SCALABLE ENTITY ITERATOR
@@ -541,7 +542,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
                 g_IsTouchingFire = false;
                 g_IsTouchingScope = false;
-                g_TouchDelta = CGPointZero;
+                g_TouchDelta = (CGPoint){ 0.0f, 0.0f };
             }
 
             if (s_ImGuiReady) {

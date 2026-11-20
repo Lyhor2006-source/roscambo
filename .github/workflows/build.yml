@@ -40,7 +40,7 @@ jobs:
             -O3 -std=c++17 -fno-objc-arc \
             -I. -I./imgui -I./imgui/backends \
             -shared -fPIC -fuse-ld=lld \
-            -framework UIKit -framework Metal \
+            -framework UIKit -framework Metal -framework CoreGraphics \
             -framework QuartzCore -framework Foundation \
             -o roscheat.dylib \
             RosCheatMetal.mm \
