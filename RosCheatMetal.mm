@@ -8,7 +8,6 @@
 
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
-#import <MetalKit/MetalKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>

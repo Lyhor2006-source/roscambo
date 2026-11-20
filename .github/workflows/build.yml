@@ -16,7 +16,7 @@ jobs:
       - name: Install Clang & Build Tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y clang lld llvm curl git make
+          sudo apt-get install -y clang lld llvm curl git make libc++-dev libc++abi-dev
 
       - name: Download Apple iOS SDK
         run: |
@@ -36,10 +36,11 @@ jobs:
           echo "[*] Compiling roscheat.dylib for arm64..."
           clang++ -target arm64-apple-ios14.0 \
             -isysroot ~/sdks/iPhoneOS14.5.sdk \
+            -stdlib=libc++ \
             -O3 -std=c++17 -fno-objc-arc \
             -I. -I./imgui -I./imgui/backends \
             -shared -fPIC -fuse-ld=lld \
-            -framework UIKit -framework Metal -framework MetalKit \
+            -framework UIKit -framework Metal \
             -framework QuartzCore -framework Foundation \
             -o roscheat.dylib \
             RosCheatMetal.mm \
