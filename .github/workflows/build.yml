@@ -1,0 +1,51 @@
+name: Build RosCambo iOS Cheat
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Toolchain
+        run: |
+          sudo xcode-select -switch /Applications/Xcode.app
+          brew install ldid
+
+      - name: Compile roscheat.dylib
+        run: |
+          make
+          ls -lh roscheat.dylib
+
+      - name: Setup optool & Inject if IPA exists
+        run: |
+          git clone --depth 1 https://github.com/alexzielenski/optool.git
+          cd optool
+          xcodebuild -project optool.xcodeproj -target optool -configuration Release
+          sudo cp build/Release/optool /usr/local/bin/
+          cd ..
+          rm -rf optool
+
+          # Check if an IPA exists in root
+          IPA_FILE=$(find . -maxdepth 1 -name "*.ipa" | head -n 1)
+          if [ -n "$IPA_FILE" ]; then
+            echo "[*] Found IPA: $IPA_FILE. Starting injection..."
+            chmod +x inject.sh
+            ./inject.sh "$IPA_FILE" "RoS-Cambo-Modded.ipa"
+          else
+            echo "[*] No IPA in root. Packaging roscheat.dylib only."
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RosCambo-Build-Output
+          path: |
+            roscheat.dylib
+            *.ipa
