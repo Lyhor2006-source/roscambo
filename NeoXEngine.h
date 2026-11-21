@@ -142,6 +142,9 @@ struct RosPlayer {
     float distance;
 };
 
+#import <mach/mach.h>
+#import <mach/vm_region.h>
+
 class MemoryEngine {
 public:
     static uintptr_t GetBaseAddress() {
@@ -153,22 +156,36 @@ public:
     }
 
     static bool IsValidAddress(uintptr_t addr) {
-        return (addr >= 0x100000000ULL && addr <= 0x3000000000ULL);
+        if (addr < 0x100000000ULL || addr > 0x3000000000ULL) return false;
+        vm_address_t region_addr = (vm_address_t)addr;
+        vm_size_t region_size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object_name = MACH_PORT_NULL;
+        kern_return_t kr = vm_region_64(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name);
+        if (kr != KERN_SUCCESS) return false;
+        if (addr < region_addr || addr >= (region_addr + region_size)) return false;
+        if (!(info.protection & VM_PROT_READ)) return false;
+        return true;
     }
 
     template <typename T>
-    static T Read(uintptr_t addr) {
+    static T Read(uintptr_t addr, T fallback = T{}) {
+        if (!IsValidAddress(addr)) return fallback;
         T val{};
-        if (!IsValidAddress(addr)) return val;
-        val = *reinterpret_cast<T*>(addr);
-        return val;
+        vm_size_t bytes_read = 0;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, sizeof(T), (vm_address_t)&val, &bytes_read);
+        if (kr == KERN_SUCCESS && bytes_read == sizeof(T)) {
+            return val;
+        }
+        return fallback;
     }
 
     template <typename T>
     static bool Write(uintptr_t addr, T value) {
         if (!IsValidAddress(addr)) return false;
-        *reinterpret_cast<T*>(addr) = value;
-        return true;
+        kern_return_t kr = vm_write(mach_task_self(), (vm_address_t)addr, (vm_offset_t)&value, sizeof(T));
+        return (kr == KERN_SUCCESS);
     }
 };
 

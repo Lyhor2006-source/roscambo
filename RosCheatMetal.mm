@@ -234,55 +234,29 @@ public:
         uintptr_t base = MemoryEngine::GetBaseAddress();
         if (!base) return false;
 
-        // Dynamic search for Camera VP Matrix if static offset is unmapped
-        static uintptr_t s_ResolvedCameraObj = 0;
-        static uintptr_t s_ResolvedClientApp = 0;
+        uintptr_t client_app = MemoryEngine::Read<uintptr_t>(base + 0x3B20000);
+        if (!MemoryEngine::IsValidAddress(client_app)) {
+            return false;
+        }
 
-        if (s_ResolvedClientApp == 0) {
-            uintptr_t client_app = MemoryEngine::Read<uintptr_t>(base + 0x3B20000);
-            if (MemoryEngine::IsValidAddress(client_app)) {
-                s_ResolvedClientApp = client_app;
-            } else {
-                // Scan __DATA pointers (from base + 0x339C000 to base + 0x45E8000)
-                for (uintptr_t probe = base + 0x339C000; probe < base + 0x4000000; probe += 0x1000) {
-                    uintptr_t cand = MemoryEngine::Read<uintptr_t>(probe);
-                    if (MemoryEngine::IsValidAddress(cand)) {
-                        uintptr_t cam = MemoryEngine::Read<uintptr_t>(cand + 0x2A0);
-                        if (MemoryEngine::IsValidAddress(cam)) {
-                            Matrix4x4 test_m = MemoryEngine::Read<Matrix4x4>(cam + 0x180);
-                            if (fabsf(test_m.m[3][3]) < 0.001f && (fabsf(test_m.m[2][3] - 1.0f) < 0.01f || fabsf(test_m.m[2][3] + 1.0f) < 0.01f)) {
-                                s_ResolvedClientApp = cand;
-                                s_ResolvedCameraObj = cam;
-                                break;
-                            }
-                        }
-                    }
-                }
+        uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
+        if (MemoryEngine::IsValidAddress(camera_obj)) {
+            out_vp = MemoryEngine::Read<Matrix4x4>(camera_obj + 0x180);
+            out_camera_yaw = MemoryEngine::Read<float>(camera_obj + 0x210);
+            float fov = MemoryEngine::Read<float>(camera_obj + 0x218);
+            if (fov > 0.0f && fov < 55.0f) {
+                out_is_scoped = true;
             }
         }
 
-        if (s_ResolvedClientApp != 0) {
-            if (s_ResolvedCameraObj == 0) {
-                s_ResolvedCameraObj = MemoryEngine::Read<uintptr_t>(s_ResolvedClientApp + 0x2A0);
-            }
+        uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + 0xF98);
+        if (MemoryEngine::IsValidAddress(local_player)) {
+            out_local_pos = MemoryEngine::Read<Vector3>(local_player + 0x90);
+            out_local_team = MemoryEngine::Read<int>(local_player + 0x1C4);
+        }
 
-            if (MemoryEngine::IsValidAddress(s_ResolvedCameraObj)) {
-                out_vp = MemoryEngine::Read<Matrix4x4>(s_ResolvedCameraObj + 0x180);
-                out_camera_yaw = MemoryEngine::Read<float>(s_ResolvedCameraObj + 0x210);
-                float fov = MemoryEngine::Read<float>(s_ResolvedCameraObj + 0x218);
-                if (fov > 0.0f && fov < 55.0f) {
-                    out_is_scoped = true;
-                }
-            }
-
-            uintptr_t local_player = MemoryEngine::Read<uintptr_t>(s_ResolvedClientApp + 0xF98);
-            if (MemoryEngine::IsValidAddress(local_player)) {
-                out_local_pos = MemoryEngine::Read<Vector3>(local_player + 0x90);
-                out_local_team = MemoryEngine::Read<int>(local_player + 0x1C4);
-            }
-
-            uintptr_t entity_buckets = MemoryEngine::Read<uintptr_t>(s_ResolvedClientApp + 0xF70);
-            size_t bucket_count = MemoryEngine::Read<size_t>(s_ResolvedClientApp + 0xF78);
+        uintptr_t entity_buckets = MemoryEngine::Read<uintptr_t>(client_app + 0xF70);
+        size_t bucket_count = MemoryEngine::Read<size_t>(client_app + 0xF78);
             if (MemoryEngine::IsValidAddress(entity_buckets) && bucket_count > 0 && bucket_count <= 4096) {
                 for (size_t i = 0; i < bucket_count; ++i) {
                     uintptr_t node = MemoryEngine::Read<uintptr_t>(entity_buckets + (i * sizeof(uintptr_t)));
@@ -335,10 +309,7 @@ public:
                     }
                 }
             }
-            return true;
-        }
-
-        return false;
+        return true;
     }
 };
 
