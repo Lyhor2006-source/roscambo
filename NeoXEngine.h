@@ -66,10 +66,11 @@ namespace NeoXOffsets {
 
     // cocos2d::Camera & Globals:
     constexpr uintptr_t CAMERA_GLOBAL_POOL         = 0x44CA8F0; // Camera::_visitingCamera in __DATA (0x100cff278 / 0x100e8a590)
-    constexpr uintptr_t CAMERA_VTABLE              = 0x341C308; // Exact vtable for cocos2d::Camera in __DATA (0x100e495ec / 0x100e49808)
+    constexpr uintptr_t CAMERA_VTABLE              = 0x341BD48; // Exact verified vtable for cocos2d::Camera in __DATA (from constructor 0x100e48b64)
 
     // cocos2d::Director & Scene:
-    constexpr uintptr_t DIRECTOR_RUNNING_SCENE     = 0x1A0;     // Director::_runningScene (0x100ed33bc: ldr x0, [x0, #0x1a0])
+    constexpr uintptr_t DIRECTOR_RUNNING_SCENE     = 0x148;     // Director::_runningScene (verified from 0x100e4865c: ldr x8, [x0, #0x148])
+    constexpr uintptr_t SCENE_DEFAULT_CAMERA       = 0x238;     // Scene::_defaultCamera (verified from 0x100e48664: ldr x0, [x8, #0x238])
     constexpr uintptr_t SCENE_CAMERAS_BEGIN        = 0x220;     // Scene::_cameras begin
     constexpr uintptr_t SCENE_CAMERAS_END          = 0x228;     // Scene::_cameras end
 

@@ -392,7 +392,7 @@ static uintptr_t ScanHeapForClientApp(uintptr_t base) {
     return 0;
 }
 
-// Direct Heap Scanner for cocos2d::Camera instance (matches vtable base + CAMERA_VTABLE: 0x341C308)
+// Direct Heap Scanner for cocos2d::Camera instance (matches vtable base + CAMERA_VTABLE: 0x341BD48)
 static uintptr_t ScanHeapForCamera(uintptr_t base) {
     if (!base) return 0;
     uintptr_t expected_vtable = base + NeoXOffsets::CAMERA_VTABLE;
@@ -495,14 +495,17 @@ public:
             }
         }
 
-        // Priority 3: cocos2d::Director -> Scene -> Cameras
+        // Priority 3: cocos2d::Director -> Scene -> Cameras (verified from 0x100e48658 Camera::getDefaultCamera)
         if (!ProjectionEngine::IsValidViewProjMatrix(out_vp)) {
             uintptr_t director_ptr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::DIRECTOR_GLOBAL_PTR);
             if (MemoryEngine::IsValidAddress(director_ptr)) {
                 uintptr_t scene_ptr = MemoryEngine::Read<uintptr_t>(director_ptr + NeoXOffsets::DIRECTOR_RUNNING_SCENE);
+                if (!MemoryEngine::IsValidAddress(scene_ptr)) {
+                    scene_ptr = MemoryEngine::Read<uintptr_t>(director_ptr + 0x1A0); // fallback offset
+                }
                 if (MemoryEngine::IsValidAddress(scene_ptr)) {
-                    // Check Scene + 0x50 (Camera direct slot from initPerspective)
-                    uintptr_t sc_cam = MemoryEngine::Read<uintptr_t>(scene_ptr + 0x50);
+                    // Check Scene + 0x238 (exact _defaultCamera slot from 0x100e48664)
+                    uintptr_t sc_cam = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_DEFAULT_CAMERA);
                     if (MemoryEngine::IsValidAddress(sc_cam) && MemoryEngine::Read<uintptr_t>(sc_cam) == base + NeoXOffsets::CAMERA_VTABLE) {
                         Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(sc_cam + NeoXOffsets::CAMERA_VIEW_PROJ);
                         if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
@@ -510,18 +513,31 @@ public:
                             out_vp = cam_vp;
                         }
                     }
+                    // Check Scene::_cameras vector (begin: 0x220, end: 0x228)
+                    if (!ProjectionEngine::IsValidViewProjMatrix(out_vp)) {
+                        uintptr_t cam_begin = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_BEGIN);
+                        uintptr_t cam_end = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_END);
+                        if (MemoryEngine::IsValidAddress(cam_begin) && MemoryEngine::IsValidAddress(cam_end) && cam_end >= cam_begin && (cam_end - cam_begin) <= 32 * sizeof(uintptr_t)) {
+                            for (uintptr_t p = cam_begin; p < cam_end; p += sizeof(uintptr_t)) {
+                                uintptr_t c = MemoryEngine::Read<uintptr_t>(p);
+                                if (MemoryEngine::IsValidAddress(c) && MemoryEngine::Read<uintptr_t>(c) == base + NeoXOffsets::CAMERA_VTABLE) {
+                                    Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(c + NeoXOffsets::CAMERA_VIEW_PROJ);
+                                    if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                        s_ActiveCamera = c;
+                                        out_vp = cam_vp;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Priority 4: Heap scan for Camera vtable (base + 0x341C308) - throttled to once every 180 frames (3s)
-        if (!ProjectionEngine::IsValidViewProjMatrix(out_vp) && (s_FrameCount % 180 == 1)) {
-            uintptr_t found_cam = ScanHeapForCamera(base);
-            if (found_cam) {
-                s_ActiveCamera = found_cam;
-                out_vp = MemoryEngine::Read<Matrix4x4>(found_cam + NeoXOffsets::CAMERA_VIEW_PROJ);
-            }
-        }
+        // Priority 4: Heap scan for Camera vtable (base + 0x341C308)
+        // NOTE: NEVER run synchronous heap scan on the Metal render thread! That blocks the GPU pipeline and tanks FPS.
+        // Camera heap scan is executed on-demand via USB command 'SCAN' or background worker.
 
         // 2. Resolve ClientApp:
         // Priority 1: Verified static pointer at base + 0x37819F0 (0x100883c48: ldr x0, [base + 0x37819F0])
@@ -533,12 +549,7 @@ public:
                     s_CapturedEntityManager = global_app;
                 }
             }
-            if (!s_CapturedEntityManager && (s_FrameCount % 180 == 1)) {
-                uintptr_t found = ScanHeapForClientApp(base);
-                if (found) {
-                    s_CapturedEntityManager = found;
-                }
-            }
+            // Heap scan for ClientApp is only done once on initialization or on-demand
         }
 
         uintptr_t client_app = s_CapturedEntityManager;
@@ -610,19 +621,23 @@ public:
                     pos = s_CachedEntityPositions[ent_id].pos;
                 }
 
-                if (pos.Length() > 1.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
+                if (pos.Length() > 5.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
+                    int raw_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
+                    int raw_max_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
+                    // Discard invalid / lobby memory garbage
+                    if (raw_max_hp < 1 || raw_max_hp > 500) return;
+                    if (raw_hp < 0 || raw_hp > raw_max_hp + 50) return;
+                    if (ent_id <= 0) return;
+
                     RosPlayer p{};
                     p.instance = entity;
                     p.id = ent_id;
                     p.position = pos;
-                    p.health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
-                    p.max_health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
+                    p.health = (raw_hp <= 0) ? 100 : raw_hp;
+                    p.max_health = (raw_max_hp <= 0) ? 100 : raw_max_hp;
                     p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
                     p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
                     p.is_bot = ((uint32_t)ent_id <= 0x40000000);
-
-                    if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
-                    if (p.health <= 0 || p.health > p.max_health) p.health = 100;
 
                     float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
                     p.distance = dist;
@@ -717,14 +732,6 @@ public:
 };
 
 // =============================================================================
-// USB LIVE DEBUGGER STATE & BUFFER (Port 1337 via USBMUX)
-// =============================================================================
-static std::string s_LatestDebugReport = "";
-static std::mutex s_DebugReportMutex;
-static std::atomic<int> s_UsbClientFd{-1};
-static int s_UsbDebugServerFd = -1;
-
-// =============================================================================
 // GAMEPLAY DEBUG SCANNER & USB LOGGER (Writes to Documents/debug.txt & NSLog)
 // =============================================================================
 static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const Vector3& local_pos, int local_team, const Matrix4x4& vp, float camera_yaw, CGSize screenSize, bool is_manual_dump = false) {
@@ -810,15 +817,17 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const
             }
             [log appendFormat:@"==================================================\n\n"];
 
-            // 1. Write to Documents/debug.txt
-            NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-            if (paths.count > 0) {
-                NSString* docDir = [paths firstObject];
-                NSString* filePath = [docDir stringByAppendingPathComponent:@"debug.txt"];
-                NSError* err = nil;
-                [log writeToFile:filePath atomically:NO encoding:NSUTF8StringEncoding error:&err];
-                if (err) {
-                    NSLog(@"[RosCambo-DEBUG] Failed to write debug.txt: %@", err);
+            // 1. Write to Documents/debug.txt only on manual snapshot to prevent iOS flash I/O lag
+            if (is_manual_dump) {
+                NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+                if (paths.count > 0) {
+                    NSString* docDir = [paths firstObject];
+                    NSString* filePath = [docDir stringByAppendingPathComponent:@"debug.txt"];
+                    NSError* err = nil;
+                    [log writeToFile:filePath atomically:NO encoding:NSUTF8StringEncoding error:&err];
+                    if (err) {
+                        NSLog(@"[RosCambo-DEBUG] Failed to write debug.txt: %@", err);
+                    }
                 }
             }
 
@@ -870,8 +879,13 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const
 }
 
 // =============================================================================
-// USB LIVE DEBUGGER TCP SERVER THREAD
+// USB LIVE DEBUGGER TCP SERVER (Port 1337 via USBMUX)
 // =============================================================================
+static int s_UsbDebugServerFd = -1;
+static std::atomic<int> s_UsbClientFd{-1};
+static std::string s_LatestDebugReport = "";
+static std::mutex s_DebugReportMutex;
+
 static void* UsbDebugServerThread(void* arg) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -947,9 +961,8 @@ static void* UsbDebugServerThread(void* arg) {
                     const char* res = "[OK] Dump triggered.\n";
                     send(client_fd, res, strlen(res), 0);
                 } else if (cmd == "ESP") {
-                    Menu::Cfg().espEnabled = !Menu::Cfg().espEnabled;
-                    g_Cheat.esp_enabled = Menu::Cfg().espEnabled;
-                    const char* res = Menu::Cfg().espEnabled ? "[OK] ESP Enabled\n" : "[OK] ESP Disabled\n";
+                    Menu::Cfg().esp = !Menu::Cfg().esp;
+                    const char* res = Menu::Cfg().esp ? "[OK] ESP Enabled\n" : "[OK] ESP Disabled\n";
                     send(client_fd, res, strlen(res), 0);
                 } else if (cmd == "PING") {
                     send(client_fd, "PONG\n", 5, 0);
@@ -1456,7 +1469,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     // ECLIPSE IMGUI DESIGN DASHBOARD (White Modern Theme)
     // =========================================================================
     char hud_title[96];
-    std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%zu", (size_t)g_TelemetryEntitiesLoaded);
+    std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%zu", g_TelemetryEntitiesLoaded);
     Menu::RenderHud(hud_title);
     Menu::Render(&g_Cheat.menu_open);
 
@@ -1647,7 +1660,9 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
             RenderRosCamboOverlay(cmdBuffer, metalDrawable);
         }
     }
-    [self ros_presentDrawable:drawable afterMinimumDuration:duration];
+    // Uncap 30 FPS: If game passes duration > 0.0166667 (30 FPS cap), clamp to 0.0 so iOS display link runs at full 60/120 FPS
+    CFTimeInterval uncap_duration = (duration > 0.0166667) ? 0.0 : duration;
+    [self ros_presentDrawable:drawable afterMinimumDuration:uncap_duration];
 }
 @end
 
