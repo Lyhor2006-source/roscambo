@@ -717,6 +717,14 @@ public:
 };
 
 // =============================================================================
+// USB LIVE DEBUGGER STATE & BUFFER (Port 1337 via USBMUX)
+// =============================================================================
+static std::string s_LatestDebugReport = "";
+static std::mutex s_DebugReportMutex;
+static std::atomic<int> s_UsbClientFd{-1};
+static int s_UsbDebugServerFd = -1;
+
+// =============================================================================
 // GAMEPLAY DEBUG SCANNER & USB LOGGER (Writes to Documents/debug.txt & NSLog)
 // =============================================================================
 static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const Vector3& local_pos, int local_team, const Matrix4x4& vp, float camera_yaw, CGSize screenSize, bool is_manual_dump = false) {
@@ -862,13 +870,8 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const
 }
 
 // =============================================================================
-// USB LIVE DEBUGGER TCP SERVER (Port 1337 via USBMUX)
+// USB LIVE DEBUGGER TCP SERVER THREAD
 // =============================================================================
-static int s_UsbDebugServerFd = -1;
-static std::atomic<int> s_UsbClientFd{-1};
-static std::string s_LatestDebugReport = "";
-static std::mutex s_DebugReportMutex;
-
 static void* UsbDebugServerThread(void* arg) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -944,8 +947,9 @@ static void* UsbDebugServerThread(void* arg) {
                     const char* res = "[OK] Dump triggered.\n";
                     send(client_fd, res, strlen(res), 0);
                 } else if (cmd == "ESP") {
-                    Menu::Cfg().esp = !Menu::Cfg().esp;
-                    const char* res = Menu::Cfg().esp ? "[OK] ESP Enabled\n" : "[OK] ESP Disabled\n";
+                    Menu::Cfg().espEnabled = !Menu::Cfg().espEnabled;
+                    g_Cheat.esp_enabled = Menu::Cfg().espEnabled;
+                    const char* res = Menu::Cfg().espEnabled ? "[OK] ESP Enabled\n" : "[OK] ESP Disabled\n";
                     send(client_fd, res, strlen(res), 0);
                 } else if (cmd == "PING") {
                     send(client_fd, "PONG\n", 5, 0);
@@ -1452,7 +1456,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     // ECLIPSE IMGUI DESIGN DASHBOARD (White Modern Theme)
     // =========================================================================
     char hud_title[96];
-    std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%zu", g_TelemetryEntitiesLoaded);
+    std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%zu", (size_t)g_TelemetryEntitiesLoaded);
     Menu::RenderHud(hud_title);
     Menu::Render(&g_Cheat.menu_open);
 
