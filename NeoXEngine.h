@@ -195,6 +195,15 @@ struct RosPlayer {
     bool is_bot;
     char name[64];
     float distance;
+
+    // RyomenX Bridge 2D screen positions & visibility
+    bool has_bridge_w2s = false;
+    Vector2 crown_screen_bridge = {0, 0};
+    Vector2 feet_screen_bridge = {0, 0};
+    bool is_visible = false;
+    bool is_knocked = false;
+    Vector2 bones_screen[BONE_COUNT];
+    bool bones_screen_valid[BONE_COUNT] = {false};
 };
 
 #import <mach/mach.h>

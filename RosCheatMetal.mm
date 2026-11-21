@@ -32,6 +32,18 @@
 #include "ImGuiTheme.h"
 #include "AvatarData.h"
 #include "Menu.h"
+#include "RosGameBridge.h"
+
+struct BonePair { int from; int to; };
+static const BonePair kRyomenBones[] = {
+    {0, 1},   // head -> neck
+    {1, 2},   // neck -> chest
+    {2, 3},   // chest -> pelvis
+    {1, 4}, {4, 5}, {5, 6},     // left arm
+    {1, 7}, {7, 8}, {8, 9},     // right arm
+    {3, 10}, {10, 11}, {11, 12}, // left leg
+    {3, 13}, {13, 14}, {14, 15}  // right leg
+};
 
 enum AimTriggerMode : int {
     TRIGGER_ALWAYS = 0,
@@ -1183,7 +1195,7 @@ static void InitializeMetalOverlay(id<MTLDevice> device) {
     io.IniFilename = nullptr; // Stateless configuration
     io.MouseDrawCursor = false;
 
-    Menu::ApplyWhiteTheme(1.0f, ImVec4(0.20f, 0.45f, 1.0f, 1.0f));
+    Menu::ApplyRyomenVipTheme(1.0f);
     ImGui_ImplMetal_Init(device);
     LoadAvatarTexture(device);
     g_MenuAvatarTexture = (__bridge void*)s_AvatarTexture;
@@ -1368,6 +1380,23 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
 
+    // -------------------------------------------------------------------------
+    // RYOMENX PYTHON BRIDGE INGESTION & CONFIG SYNC
+    // -------------------------------------------------------------------------
+    RosGameBridge::TryInjectPayload();
+    RosGameBridge::PushConfig(
+        cfg.aimEnabled, cfg.aimActivation, cfg.aimFov, cfg.aimSmooth, cfg.aimPower,
+        cfg.aimVisibleOnly, cfg.aimIgnoreKnocked, cfg.aimBone, screenSize.width, screenSize.height, cfg.aimDistance,
+        cfg.silentAim, cfg.aim360, cfg.espHideBots, cfg.espSkeleton,
+        cfg.ipadFovEnabled, cfg.ipadFovDeg,
+        cfg.memSpeedHack, cfg.memSpeedVal,
+        cfg.memWallhack, cfg.memNoFallDamage, cfg.memFlyHack, cfg.memUnderground,
+        cfg.memNoGrass, cfg.memFastParachute, cfg.ipadFovEnabled, cfg.memClearFog, cfg.memNoRecoil
+    );
+
+    BridgeSnapshot snap;
+    bool has_bridge = RosGameBridge::FetchSnapshot(snap) && (snap.players.size() > 0 || snap.entity_count > 0);
+
     Vector3 local_pos;
     int local_team = 0;
     Matrix4x4 vp_matrix{};
@@ -1376,9 +1405,37 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     bool is_scoped = false;
     std::vector<RosPlayer> players;
 
-    RosGameScanner::FetchState(players, local_pos, local_team, vp_matrix, camera_yaw, is_firing, is_scoped);
+    if (has_bridge && snap.players.size() > 0) {
+        local_pos = snap.local_pos;
+        for (const auto& bp : snap.players) {
+            RosPlayer p{};
+            p.instance = (uintptr_t)bp.entity_id;
+            p.id = bp.entity_id;
+            p.position = bp.pos;
+            p.health = bp.health;
+            p.max_health = bp.max_health;
+            p.team_id = bp.team_id;
+            p.is_bot = bp.is_bot;
+            p.distance = bp.distance;
+            p.is_visible = bp.is_visible;
+            p.is_knocked = bp.is_knocked;
+            p.has_bones = true;
+            p.has_bridge_w2s = bp.on_screen;
+            p.crown_screen_bridge = Vector2(bp.hs_x, bp.hs_y);
+            p.feet_screen_bridge = Vector2(bp.fs_x, bp.fs_y);
+            for (int b = 0; b < 16; ++b) {
+                p.bones_screen_valid[b] = bp.bones[b].valid;
+                p.bones_screen[b] = Vector2(bp.bones[b].x, bp.bones[b].y);
+            }
+            std::strncpy(p.name, bp.name, sizeof(p.name) - 1);
+            players.push_back(p);
+        }
+    } else {
+        RosGameScanner::FetchState(players, local_pos, local_team, vp_matrix, camera_yaw, is_firing, is_scoped);
+    }
+
     g_TelemetryEntitiesLoaded = players.size();
-    g_TelemetryVpValid = ProjectionEngine::IsValidViewProjMatrix(vp_matrix);
+    g_TelemetryVpValid = has_bridge || ProjectionEngine::IsValidViewProjMatrix(vp_matrix);
 
     // Periodic & On-Demand Debug State Dump (to Documents/debug.txt, USB Debugger & NSLog)
     static uint64_t s_LastDebugDumpFrame = 0;
@@ -1423,13 +1480,23 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         for (const auto& player : players) {
             if (g_Cheat.team_check && player.team_id == local_team) continue;
 
-            float h_crown = (player.stance == 1 ? 1.40f : (player.stance == 2 ? 0.70f : 1.85f));
-            Vector3 crown_3d = player.position + Vector3(0, h_crown, 0);
-            Vector3 feet_3d = player.position;
-
             Vector2 crown_screen, feet_screen;
-            bool crown_w2s = ProjectionEngine::WorldToScreen(crown_3d, crown_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
-            bool feet_w2s  = ProjectionEngine::WorldToScreen(feet_3d, feet_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
+            bool crown_w2s = false;
+            bool feet_w2s  = false;
+
+            if (player.has_bridge_w2s) {
+                crown_screen = player.crown_screen_bridge;
+                feet_screen = player.feet_screen_bridge;
+                crown_w2s = true;
+                feet_w2s = true;
+            } else {
+                float h_crown = (player.stance == 1 ? 1.40f : (player.stance == 2 ? 0.70f : 1.85f));
+                Vector3 crown_3d = player.position + Vector3(0, h_crown, 0);
+                Vector3 feet_3d = player.position;
+
+                crown_w2s = ProjectionEngine::WorldToScreen(crown_3d, crown_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
+                feet_w2s  = ProjectionEngine::WorldToScreen(feet_3d, feet_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
+            }
 
             if (&player == &players[0]) {
                 g_TelemetryW2S_X = crown_screen.x;
@@ -1455,7 +1522,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             float box_x = box_center_x - (box_w * 0.5f);
             float box_y = box_top;
 
-            ImU32 box_color = player.is_bot ? IM_COL32(255, 180, 0, 255) : IM_COL32(255, 40, 40, 255);
+            ImU32 box_color = player.is_bot ? IM_COL32(255, 180, 0, 255) : (player.is_visible ? IM_COL32(0, 255, 120, 255) : IM_COL32(255, 40, 40, 255));
 
             if (g_Cheat.esp_box) {
                 if (g_Cheat.esp_box_type == 0) {
@@ -1507,26 +1574,59 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             }
 
             if (g_Cheat.esp_skeleton && player.has_bones) {
-                ImU32 skel_col = IM_COL32(0, 220, 255, 230);
-                for (int i = 0; i < kSkeletonJointCount; ++i) {
-                    Vector2 s1, s2;
-                    if (ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].from], s1, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera) &&
-                        ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].to], s2, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
-                        draw->AddLine(ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), skel_col, g_Cheat.skeleton_thickness);
+                ImU32 skel_col = player.is_visible ? IM_COL32(0, 255, 120, 230) : IM_COL32(0, 220, 255, 230);
+                if (player.has_bridge_w2s) {
+                    for (int i = 0; i < 15; ++i) {
+                        int b1 = kRyomenBones[i].from;
+                        int b2 = kRyomenBones[i].to;
+                        if (player.bones_screen_valid[b1] && player.bones_screen_valid[b2]) {
+                            draw->AddLine(ImVec2(player.bones_screen[b1].x, player.bones_screen[b1].y),
+                                          ImVec2(player.bones_screen[b2].x, player.bones_screen[b2].y),
+                                          skel_col, g_Cheat.skeleton_thickness);
+                        }
+                    }
+                } else {
+                    for (int i = 0; i < kSkeletonJointCount; ++i) {
+                        Vector2 s1, s2;
+                        if (ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].from], s1, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera) &&
+                            ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].to], s2, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
+                            draw->AddLine(ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), skel_col, g_Cheat.skeleton_thickness);
+                        }
                     }
                 }
             }
 
             if (g_Cheat.aimbot_enabled) {
-                Vector3 target_3d = crown_3d - Vector3(0, 0.12f, 0); // Head center
-                if (player.has_bones) {
-                    if (g_Cheat.aim_target_bone == BONE_NECK && player.bones[BONE_NECK].Length() > 1.0f) target_3d = player.bones[BONE_NECK];
-                    if (g_Cheat.aim_target_bone == BONE_CHEST && player.bones[BONE_CHEST].Length() > 1.0f) target_3d = player.bones[BONE_CHEST];
-                    if (g_Cheat.aim_target_bone == BONE_PELVIS && player.bones[BONE_PELVIS].Length() > 1.0f) target_3d = player.bones[BONE_PELVIS];
+                Vector2 target_2d;
+                bool target_valid = false;
+
+                if (player.has_bridge_w2s) {
+                    if (g_Cheat.aim_target_bone == BONE_CHEST && player.bones_screen_valid[BONE_CHEST]) {
+                        target_2d = player.bones_screen[BONE_CHEST];
+                        target_valid = true;
+                    } else if (g_Cheat.aim_target_bone == BONE_PELVIS && player.bones_screen_valid[BONE_PELVIS]) {
+                        target_2d = player.bones_screen[BONE_PELVIS];
+                        target_valid = true;
+                    } else if (player.bones_screen_valid[BONE_HEAD]) {
+                        target_2d = player.bones_screen[BONE_HEAD];
+                        target_valid = true;
+                    } else {
+                        target_2d = crown_screen;
+                        target_valid = true;
+                    }
+                } else {
+                    float h_crown_aim = (player.stance == 1 ? 1.40f : (player.stance == 2 ? 0.70f : 1.85f));
+                    Vector3 crown_3d_aim = player.position + Vector3(0, h_crown_aim, 0);
+                    Vector3 target_3d = crown_3d_aim - Vector3(0, 0.12f, 0); // Head center
+                    if (player.has_bones) {
+                        if (g_Cheat.aim_target_bone == BONE_NECK && player.bones[BONE_NECK].Length() > 1.0f) target_3d = player.bones[BONE_NECK];
+                        if (g_Cheat.aim_target_bone == BONE_CHEST && player.bones[BONE_CHEST].Length() > 1.0f) target_3d = player.bones[BONE_CHEST];
+                        if (g_Cheat.aim_target_bone == BONE_PELVIS && player.bones[BONE_PELVIS].Length() > 1.0f) target_3d = player.bones[BONE_PELVIS];
+                    }
+                    target_valid = ProjectionEngine::WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
                 }
 
-                Vector2 target_2d;
-                if (ProjectionEngine::WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
+                if (target_valid) {
                     float dist_center = (target_2d - center).Length();
                     if (dist_center <= g_Cheat.aim_fov && dist_center < closest_aim_dist) {
                         closest_aim_dist = dist_center;
@@ -1616,15 +1716,17 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     }
 
     // =========================================================================
-    // ECLIPSE IMGUI DESIGN DASHBOARD (White Modern Theme)
+    // RYOMEN VIP CYBER DASHBOARD & DYNAMIC ISLAND HUD
     // =========================================================================
-    char hud_title[96];
-    if (g_TelemetryEntitiesLoaded == 0 && s_CachedEntityPositions.size() <= 8) {
-        std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | LOBBY | 60 fps");
-    } else {
-        std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%llu", (unsigned long long)g_TelemetryEntitiesLoaded);
+    int enemy_count = 0;
+    int bot_count = 0;
+    for (const auto& p : players) {
+        if (p.is_bot) bot_count++;
+        else enemy_count++;
     }
-    Menu::RenderHud(hud_title);
+    bool is_battle = (players.size() > 0 || (has_bridge && snap.entity_count > 0));
+    ImGuiIO& io = ImGui::GetIO();
+    Menu::RenderDynamicIsland(&g_Cheat.menu_open, enemy_count, bot_count, is_battle, io.Framerate);
     Menu::Render(&g_Cheat.menu_open);
 
     ImGui::Render();
@@ -1757,6 +1859,15 @@ static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
                 g_TouchDelta = (CGPoint){ 0.0f, 0.0f };
             }
 
+            // Hit test Dynamic Island HUD (width 260, height 48 with touch margin)
+            float island_w = 260.0f;
+            float island_h = 48.0f;
+            float island_x = (screenSize.width - island_w) * 0.5f;
+            if (loc.x >= island_x && loc.x <= island_x + island_w &&
+                loc.y >= 6.0f && loc.y <= 6.0f + island_h) {
+                touchOverAvatar = true;
+            }
+
             // Hit test circular floating avatar
             float dx = loc.x - (g_Cheat.floating_btn_pos.x + 34.0f);
             float dy = loc.y - (g_Cheat.floating_btn_pos.y + 34.0f);
@@ -1764,11 +1875,13 @@ static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
                 touchOverAvatar = true;
             }
 
-            // Hit test dashboard when open (size 560x370)
+            // Hit test VIP Dashboard when open (size 640x430 with padding)
             if (g_Cheat.menu_open) {
-                ImVec2 menuMin = ImVec2((screenSize.width - 560) * 0.5f, (screenSize.height - 370) * 0.5f);
-                if (loc.x >= menuMin.x && loc.x <= menuMin.x + 560 &&
-                    loc.y >= menuMin.y && loc.y <= menuMin.y + 370) {
+                float mw = 640.0f;
+                float mh = 430.0f;
+                ImVec2 menuMin = ImVec2((screenSize.width - mw) * 0.5f, (screenSize.height - mh) * 0.5f);
+                if (loc.x >= menuMin.x && loc.x <= menuMin.x + mw &&
+                    loc.y >= menuMin.y && loc.y <= menuMin.y + mh) {
                     touchOverMenu = true;
                 }
             }
