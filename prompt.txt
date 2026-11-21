@@ -1,40 +1,40 @@
 # ==============================================================================
-# RULE & STANDARD ARCHITECTURE SPECIFICATION: NEOX PYTHON RUNTIME METHOD (RYOMENX PATH)
-# TARGET: RULES OF SURVIVAL (IOS/PC) & NEOX ENGINE GAMES / FAN-MADE REVIVALS
+# SPECIFICATION & SYSTEM PROMPT: EMBEDDED PYTHON RUNTIME ARCHITECTURE
+# TARGET: RULES OF SURVIVAL (IOS/PC) - NEOX ENGINE & COMMUNITY REVIVAL PROJECTS
 # ==============================================================================
 
 [CORE DIRECTIVE]
-From now on, all reverse engineering, entity tracking, offset discovery, and cheat logic must adhere to the RyomenX architectural standard: interface directly with the NeoX Engine's embedded Python runtime instead of relying solely on brittle static memory offsets.
+Do not rely on hardcoded static memory offsets (e.g. fixed memory addresses or fragile pointer chains). Instead, always interface directly with the game engine's embedded Python runtime to resolve entities, coordinates, matrices, and game states dynamically. This method must be maintained for all future updates and fan-made/custom revival builds.
 
-1. BACKGROUND & PHILOSOPHY
-- Hardcoded native memory offsets (e.g. static address pointers) break on every game patch, binary recompile, ASLR shift, or compiler optimization change.
-- The NetEase NeoX engine embeds a complete Python scripting runtime that drives all gameplay, entities, cameras, UI, and world objects (e.g., BigWorld/NeoX script architecture).
-- By tapping into the Python runtime (the "RyomenX path"), the mod dynamically retrieves game states, player coordinates, matrices, and entity pointers directly through engine-level queries.
-- When the game updates or when community fan-made revival projects / private servers are released, the native offsets change, but the high-level Python engine API remains stable and backwards-compatible.
+1. ENGINE ARCHITECTURE & TECHNICAL PRINCIPLES
+- The game runs on NetEase's NeoX engine (BigWorld-derived architecture), which embeds an internal Python scripting interpreter (Python 2.7 C-API) to execute high-level game logic.
+- Gameplay components—including player managers, world objects, inventory, camera matrices, and scene graphs—are managed within the engine's Python namespace (e.g. `client`, `logic`, `world`).
+- Static binary offsets break on every update, recompile, or ASLR shift. In contrast, the engine's Python C-API exports and high-level script interfaces remain stable and backwards-compatible across client builds.
 
-2. ARCHITECTURAL REQUIREMENTS (THE RYOMENX METHOD)
-- Direct Python C-API Interop:
-  * Hook or resolve standard Python runtime symbols (Py_Initialize, PyRun_SimpleString, PyEval_EvalCode, PyImport_ImportModule, PyDict_GetItemString, PyObject_GetAttrString).
-  * Infiltrate the global namespace (__main__, client, world, gameplay, logic).
-- Dynamic Entity Resolution:
-  * Traverse entities via engine script managers (e.g., logic.player_mgr, world.entities, or client.game_world).
-  * Read live player coordinates, health, team ID, stance, and bone transforms dynamically from Python objects or through engine-exported getters.
-  * Extract underlying native C++ pointers via Python wrapper objects (SWIG pointers, PyCapsules, or PyCObjects) when high-speed Direct Memory Reading is needed for rendering loops.
-- Viewport & Camera Extraction:
-  * Read camera transformation matrices or view-projection matrices directly from the NeoX camera manager script interface, ensuring 100% accurate World-To-Screen projection across any client build.
+2. DYNAMIC PYTHON RUNTIME INTEROPERABILITY PIPELINE
+When building, updating, or maintaining the mod/overlay, implement the following standard:
+- Python C-API Hooking & Resolution:
+  * Hook or dynamically resolve standard Python runtime symbols from the main executable:
+    `PyRun_SimpleString`, `Py_Initialize`, `PyEval_EvalCode`, `PyImport_ImportModule`,
+    `PyDict_GetItemString`, `PyObject_GetAttrString`, `PyString_AsString`, etc.
+  * Access the global engine dictionary (`__main__`, `client`, `world`, `logic`).
+- Dynamic Entity & State Traversal:
+  * Query the game's high-level entity managers (e.g. `logic.player_mgr`, `world.entities`, or `client.game_world`) directly through the Python runtime.
+  * Retrieve live entity data (position, health, team ID, stance, bone hierarchy) via engine-provided Python getters and attributes.
+  * To maximize rendering performance without Python GIL contention, unwrap native C++ underlying pointers from Python wrapper objects (SWIG pointer representations, PyCapsules, or PyCObjects) and cache them for direct memory reading.
+- Camera & Viewport Extraction:
+  * Extract view-projection matrices and camera properties directly from the NeoX camera manager script interface, ensuring 100% accurate World-To-Screen transformations on any resolution or aspect ratio.
 
-3. RESILIENCE PROTOCOL FOR UPDATES & FAN-MADE PROJECTS
-- In the event of a game patch or custom fan-made client release:
-  * Step 1: Locate the Python runtime export table / dynamic symbol table in the new executable (which almost never changes).
-  * Step 2: Use Python introspection (dir(), type(), inspect, sys.modules) injected via the bridge to dump the current entity structure and object attributes in real-time.
-  * Step 3: Automatically resolve updated fields without requiring manual disassembler (IDA/Ghidra/x64dbg) signature hunting.
-  * Step 4: Re-link the mod overlay (ImGui / Metal) to the dynamic query bridge.
+3. ADAPTATION PROTOCOL FOR UPDATES & FAN-MADE REVIVALS
+When official patches are released or when independent fan-made/community private server clients are developed:
+- Do not disassemble the binary looking for new memory offset signatures from scratch.
+- Instead, attach to the embedded Python interpreter:
+  * Step 1: Inject a lightweight Python reflection script using `PyRun_SimpleString` to inspect live modules:
+    `import sys; print [m for m in sys.modules if 'logic' in m or 'world' in m]`
+  * Step 2: Use Python introspection (`dir()`, `type()`, `getattr()`) to dynamically inspect the active player manager and entity classes.
+  * Step 3: Automatically bind the mod's readers to the identified attributes in the new build.
 
-4. DUAL-ENGINE HYBRID PIPELINE
-- Logic & Introspection: Python Runtime layer (NeoX Engine Bridge) extracts live entities and game state at tick rate.
-- High-Performance Rendering: Native C++ / Objective-C++ Metal layer (RosCheatMetal.mm + Dear ImGui) consumes cached entity buffers under thread-safe mutex guards to draw ESP, Radar, and Dynamic Island overlays at full 60/120 FPS without hitching.
-
-5. EXECUTION CONSTRAINTS
-- Zero hardcoded game-struct offsets where Python getters exist.
-- Always implement defensive exception handling around Python C-API calls to prevent engine panics.
-- Maintain compatibility with both official NetEase signed payloads and unsigned/decrypted fan-made client binaries.
+4. DUAL-ENGINE HYBRID OVERLAY ARCHITECTURE
+- Logic & Data Acquisition: Python Runtime Engine Bridge continuously retrieves and validates active game entities at engine tick frequency.
+- Native UI & Rendering: Native C++ / Objective-C++ Metal layer (`RosCheatMetal.mm` with Dear ImGui) renders ESP boxes, bone skeletons, radar, and HUD widgets at full 60/120 FPS.
+- Thread Safety: Ensure atomic flags and mutex locks synchronize the Python data extraction thread and the Metal render thread (`presentDrawable:`) to completely prevent frame scope collisions and assertion crashes.
