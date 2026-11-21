@@ -196,8 +196,8 @@ public:
                 uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + 0x18);
                 if (MemoryEngine::IsValidAddress(entity) && entity != local_player) {
                     RosPlayer p{};
-                    p.entity_ptr = entity;
-                    p.pos = MemoryEngine::Read<Vector3>(entity + 0x90);
+                    p.instance = entity;
+                    p.position = MemoryEngine::Read<Vector3>(entity + 0x90);
                     p.health = MemoryEngine::Read<int>(entity + 0x1B8);
                     p.max_health = MemoryEngine::Read<int>(entity + 0x1BC);
                     p.team_id = MemoryEngine::Read<int>(entity + 0x1C4);
@@ -206,27 +206,31 @@ public:
 
                     if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
                     if (p.health > 0 && p.health <= p.max_health) {
-                        float dist = (p.pos - out_local_pos).Length();
+                        float dist = (p.position - out_local_pos).Length();
                         p.distance = dist;
 
                         if (dist <= g_Cheat.max_esp_distance) {
                             uintptr_t name_ptr = MemoryEngine::Read<uintptr_t>(entity + 0x1E0);
                             if (MemoryEngine::IsValidAddress(name_ptr)) {
-                                char name_buf[32] = {0};
-                                MemoryEngine::ReadBuffer(name_ptr, name_buf, sizeof(name_buf) - 1);
-                                p.name = std::string(name_buf);
+                                for (int c = 0; c < 63; ++c) {
+                                    p.name[c] = MemoryEngine::Read<char>(name_ptr + c);
+                                    if (p.name[c] == '\0') break;
+                                }
+                                p.name[63] = '\0';
                             }
-                            if (p.name.empty()) {
-                                p.name = p.is_bot ? "[BOT] Patrol" : "Survivor";
+                            if (p.name[0] == '\0') {
+                                snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
                             }
 
+                            p.has_bones = false;
                             uintptr_t skeleton = MemoryEngine::Read<uintptr_t>(entity + 0x228);
                             if (MemoryEngine::IsValidAddress(skeleton)) {
                                 uintptr_t bone_array = MemoryEngine::Read<uintptr_t>(skeleton + 0x48);
                                 if (MemoryEngine::IsValidAddress(bone_array)) {
-                                    for (int b = 0; b < BONE_MAX; ++b) {
+                                    for (int b = 0; b < BONE_COUNT; ++b) {
                                         p.bones[b] = MemoryEngine::Read<Vector3>(bone_array + (b * sizeof(Vector3)));
                                     }
+                                    p.has_bones = true;
                                 }
                             }
                             out_players.push_back(p);
@@ -272,13 +276,6 @@ static void DrawCornerBox(ImDrawList* drawList, float x, float y, float w, float
     drawList->AddLine(ImVec2(x, y + h), ImVec2(x, y + h - line_h), color, thickness);
     drawList->AddLine(ImVec2(x + w, y + h), ImVec2(x + w - line_w, y + h), color, thickness);
     drawList->AddLine(ImVec2(x + w, y + h), ImVec2(x + w, y + h - line_h), color, thickness);
-}
-
-static void DrawSkeletonBone(ImDrawList* draw, const Vector3& b1, const Vector3& b2, const Matrix4x4& vp, float sw, float sh, ImU32 color, float thickness) {
-    Vector2 s1, s2;
-    if (WorldToScreen(b1, s1, vp, sw, sh) && WorldToScreen(b2, s2, vp, sw, sh)) {
-        draw->AddLine(ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), color, thickness);
-    }
 }
 
 static void RenderOffscreenRadarArrow(ImDrawList* draw, const Vector3& target_pos, const Vector3& local_pos, float camera_yaw, const Vector2& screen_center, float radius, ImU32 color) {
@@ -384,18 +381,18 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             if (g_Cheat.team_check && player.team_id == local_team) continue;
 
             Vector2 head_screen, feet_screen;
-            Vector3 head_3d = player.pos + Vector3(0, 1.80f, 0);
-            if (player.bones[BONE_HEAD].Length() > 1.0f) {
+            Vector3 head_3d = player.position + Vector3(0, 1.80f, 0);
+            if (player.has_bones && player.bones[BONE_HEAD].Length() > 1.0f) {
                 head_3d = player.bones[BONE_HEAD];
             }
 
-            bool head_w2s = WorldToScreen(head_3d, head_screen, vp_matrix, screenSize.width, screenSize.height);
-            bool feet_w2s = WorldToScreen(player.pos, feet_screen, vp_matrix, screenSize.width, screenSize.height);
+            bool head_w2s = ProjectionEngine::WorldToScreen(head_3d, head_screen, vp_matrix, screenSize.width, screenSize.height);
+            bool feet_w2s = ProjectionEngine::WorldToScreen(player.position, feet_screen, vp_matrix, screenSize.width, screenSize.height);
 
             if (!head_w2s && !feet_w2s) {
                 if (g_Cheat.esp_offscreen_360) {
                     ImU32 off_col = player.is_bot ? IM_COL32(255, 180, 0, 220) : IM_COL32(255, 45, 45, 230);
-                    RenderOffscreenRadarArrow(draw, player.pos, local_pos, camera_yaw, center, 140.0f, off_col);
+                    RenderOffscreenRadarArrow(draw, player.position, local_pos, camera_yaw, center, 140.0f, off_col);
                 }
                 continue;
             }
@@ -439,11 +436,11 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             }
 
             if (g_Cheat.esp_name || g_Cheat.esp_distance) {
-                char info_buf[64];
+                char info_buf[128];
                 if (g_Cheat.esp_name && g_Cheat.esp_distance) {
-                    snprintf(info_buf, sizeof(info_buf), "%s [%.0fm]", player.name.c_str(), player.distance);
+                    snprintf(info_buf, sizeof(info_buf), "%s [%.0fm]", player.name, player.distance);
                 } else if (g_Cheat.esp_name) {
-                    snprintf(info_buf, sizeof(info_buf), "%s", player.name.c_str());
+                    snprintf(info_buf, sizeof(info_buf), "%s", player.name);
                 } else {
                     snprintf(info_buf, sizeof(info_buf), "[%.0fm]", player.distance);
                 }
@@ -451,37 +448,27 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 draw->AddText(ImVec2(head_screen.x - (txt_sz.x * 0.5f), box_y - 16.0f), IM_COL32(255, 255, 255, 255), info_buf);
             }
 
-            if (g_Cheat.esp_skeleton && player.bones[BONE_HEAD].Length() > 1.0f) {
+            if (g_Cheat.esp_skeleton && player.has_bones) {
                 ImU32 skel_col = IM_COL32(0, 220, 255, 230);
-                DrawSkeletonBone(draw, player.bones[BONE_HEAD], player.bones[BONE_NECK], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_NECK], player.bones[BONE_CHEST], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_CHEST], player.bones[BONE_PELVIS], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-
-                DrawSkeletonBone(draw, player.bones[BONE_CHEST], player.bones[BONE_L_SHOULDER], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_L_SHOULDER], player.bones[BONE_L_ELBOW], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_L_ELBOW], player.bones[BONE_L_HAND], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-
-                DrawSkeletonBone(draw, player.bones[BONE_CHEST], player.bones[BONE_R_SHOULDER], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_R_SHOULDER], player.bones[BONE_R_ELBOW], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_R_ELBOW], player.bones[BONE_R_HAND], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-
-                DrawSkeletonBone(draw, player.bones[BONE_PELVIS], player.bones[BONE_L_HIP], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_L_HIP], player.bones[BONE_L_KNEE], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_L_KNEE], player.bones[BONE_L_FOOT], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-
-                DrawSkeletonBone(draw, player.bones[BONE_PELVIS], player.bones[BONE_R_HIP], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_R_HIP], player.bones[BONE_R_KNEE], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
-                DrawSkeletonBone(draw, player.bones[BONE_R_KNEE], player.bones[BONE_R_FOOT], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                for (int i = 0; i < kSkeletonJointCount; ++i) {
+                    Vector2 s1, s2;
+                    if (ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].from], s1, vp_matrix, screenSize.width, screenSize.height) &&
+                        ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].to], s2, vp_matrix, screenSize.width, screenSize.height)) {
+                        draw->AddLine(ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), skel_col, g_Cheat.skeleton_thickness);
+                    }
+                }
             }
 
             if (g_Cheat.aimbot_enabled) {
                 Vector3 target_3d = head_3d;
-                if (g_Cheat.aim_target_bone == BONE_NECK && player.bones[BONE_NECK].Length() > 1.0f) target_3d = player.bones[BONE_NECK];
-                if (g_Cheat.aim_target_bone == BONE_CHEST && player.bones[BONE_CHEST].Length() > 1.0f) target_3d = player.bones[BONE_CHEST];
-                if (g_Cheat.aim_target_bone == BONE_PELVIS && player.bones[BONE_PELVIS].Length() > 1.0f) target_3d = player.bones[BONE_PELVIS];
+                if (player.has_bones) {
+                    if (g_Cheat.aim_target_bone == BONE_NECK && player.bones[BONE_NECK].Length() > 1.0f) target_3d = player.bones[BONE_NECK];
+                    if (g_Cheat.aim_target_bone == BONE_CHEST && player.bones[BONE_CHEST].Length() > 1.0f) target_3d = player.bones[BONE_CHEST];
+                    if (g_Cheat.aim_target_bone == BONE_PELVIS && player.bones[BONE_PELVIS].Length() > 1.0f) target_3d = player.bones[BONE_PELVIS];
+                }
 
                 Vector2 target_2d;
-                if (WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height)) {
+                if (ProjectionEngine::WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height)) {
                     float dist_center = (target_2d - center).Length();
                     if (dist_center < closest_aim_dist) {
                         closest_aim_dist = dist_center;
