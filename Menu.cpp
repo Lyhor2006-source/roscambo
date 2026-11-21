@@ -10,6 +10,7 @@ unsigned long long  g_TelemetryMoveHits = 0;
 unsigned long long  g_TelemetryCreateHits = 0;
 unsigned long long  g_TelemetryCachedPositions = 0;
 unsigned long long  g_TelemetryEntitiesLoaded = 0;
+bool                g_TriggerDebugDump = false;
 
 namespace Menu
 {
@@ -415,6 +416,15 @@ namespace Menu
         ImGui::Text("Hook Hits (Move: %llu | Create: %llu)", g_TelemetryMoveHits, g_TelemetryCreateHits);
         ImGui::Text("Cached Positions: %llu", g_TelemetryCachedPositions);
         ImGui::Text("Entities Loaded: %llu", g_TelemetryEntitiesLoaded);
+
+        Section("DEBUG SCANNER (USB / DEBUG.TXT)");
+        Toggle("Live Log to debug.txt (USB)", &cfg.debugScanToFile);
+        if (ImGui::Button("Dump Gameplay Now", ImVec2(-RightPad(), 0)))
+        {
+            g_TriggerDebugDump = true;
+        }
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Output: Documents/debug.txt");
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Visible in 3uTools/iTunes File Sharing");
 
         Section("CONFIG");
         if (ImGui::Button("Reset to Defaults", ImVec2(-RightPad(), 0)))

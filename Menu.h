@@ -61,6 +61,7 @@ namespace Menu
         // Settings
         float accent[3]         = { 0.20f, 0.45f, 1.00f };
         bool  ghillieSpaceData  = false;
+        bool  debugScanToFile   = true;
     };
 
     Config& Cfg();
@@ -82,3 +83,4 @@ extern unsigned long long  g_TelemetryMoveHits;
 extern unsigned long long  g_TelemetryCreateHits;
 extern unsigned long long  g_TelemetryCachedPositions;
 extern unsigned long long  g_TelemetryEntitiesLoaded;
+extern bool                g_TriggerDebugDump;
