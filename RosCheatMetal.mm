@@ -15,6 +15,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <unordered_map>
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -216,12 +217,74 @@ static void DrawSettingSlider(const char* label, float* v, float min, float max,
 }
 
 // =============================================================================
-// VTABLE HOOK FOR CLIENTAPP / ENTITYMANAGER
-// Verified VTable offset at base + 0x33D8DA8 (slot for getEntity)
+// MULTI-VTABLE HOOKS & RUNTIME TELEMETRY FOR CLIENTAPP
+// VTable Slots in Mach-O __DATA:
+// base + 0x33D8D98: ClientApp::onBasePlayerCreate(this, int local_id, ...)
+// base + 0x33D8DA8: ClientApp::getEntity(this, int id)
+// base + 0x33D8DE8: ClientApp::onEntityMove(this, int id, a3, a4, Vector3* pos)
+// base + 0x33D8DF8: ClientApp::spaceData(this, ...)
 // =============================================================================
+typedef void (*onEntityMove_t)(uintptr_t this_ptr, int entity_id, uintptr_t a3, uintptr_t a4, const Vector3* pos_ptr, uintptr_t a6, uintptr_t a7);
+static onEntityMove_t s_OrigOnEntityMove = nullptr;
+
+typedef void (*onBasePlayerCreate_t)(uintptr_t this_ptr, int id, uintptr_t a3, uintptr_t a4);
+static onBasePlayerCreate_t s_OrigOnBasePlayerCreate = nullptr;
+
+typedef void (*spaceData_t)(uintptr_t this_ptr, uintptr_t a1, uintptr_t a2, int space_id, uintptr_t a4);
+static spaceData_t s_OrigSpaceData = nullptr;
+
 typedef uintptr_t (*getEntity_t)(uintptr_t this_ptr, int id);
 static getEntity_t s_OrigGetEntity = nullptr;
+
 static uintptr_t s_CapturedEntityManager = 0;
+static int s_CapturedLocalId = -1;
+static uint64_t s_MoveHookHits = 0;
+static uint64_t s_CreateHookHits = 0;
+static uint64_t s_SpaceDataHits = 0;
+static uint64_t s_FrameCount = 0;
+
+struct CachedEntityPos {
+    Vector3 pos;
+    uint64_t tick;
+};
+static std::unordered_map<int, CachedEntityPos> s_CachedEntityPositions;
+
+static void Hooked_onEntityMove(uintptr_t this_ptr, int entity_id, uintptr_t a3, uintptr_t a4, const Vector3* pos_ptr, uintptr_t a6, uintptr_t a7) {
+    s_MoveHookHits++;
+    if (this_ptr > 0x100000000ULL) {
+        s_CapturedEntityManager = this_ptr;
+    }
+    if (pos_ptr && MemoryEngine::IsValidAddress((uintptr_t)pos_ptr)) {
+        Vector3 p = MemoryEngine::Read<Vector3>((uintptr_t)pos_ptr);
+        if (std::abs(p.x) < 20000.0f && std::abs(p.y) < 20000.0f && std::abs(p.z) < 20000.0f) {
+            s_CachedEntityPositions[entity_id] = { p, s_FrameCount };
+        }
+    }
+    if (s_OrigOnEntityMove) {
+        s_OrigOnEntityMove(this_ptr, entity_id, a3, a4, pos_ptr, a6, a7);
+    }
+}
+
+static void Hooked_onBasePlayerCreate(uintptr_t this_ptr, int id, uintptr_t a3, uintptr_t a4) {
+    s_CreateHookHits++;
+    if (this_ptr > 0x100000000ULL) {
+        s_CapturedEntityManager = this_ptr;
+        s_CapturedLocalId = id;
+    }
+    if (s_OrigOnBasePlayerCreate) {
+        s_OrigOnBasePlayerCreate(this_ptr, id, a3, a4);
+    }
+}
+
+static void Hooked_spaceData(uintptr_t this_ptr, uintptr_t a1, uintptr_t a2, int space_id, uintptr_t a4) {
+    s_SpaceDataHits++;
+    if (this_ptr > 0x100000000ULL) {
+        s_CapturedEntityManager = this_ptr;
+    }
+    if (s_OrigSpaceData) {
+        s_OrigSpaceData(this_ptr, a1, a2, space_id, a4);
+    }
+}
 
 static uintptr_t Hooked_getEntity(uintptr_t this_ptr, int id) {
     if (this_ptr > 0x100000000ULL) {
@@ -233,21 +296,110 @@ static uintptr_t Hooked_getEntity(uintptr_t this_ptr, int id) {
     return 0;
 }
 
-static void InstallVTableHook() {
+static void InstallVTableHooks() {
     uintptr_t base = MemoryEngine::GetBaseAddress();
     if (!base) return;
 
-    uintptr_t slot = base + 0x33D8DA8;
-    uintptr_t current_fn = MemoryEngine::Read<uintptr_t>(slot);
-    if (current_fn != 0 && current_fn != (uintptr_t)&Hooked_getEntity) {
-        s_OrigGetEntity = (getEntity_t)current_fn;
+    uintptr_t slot_create = base + 0x33D8D98;
+    uintptr_t slot_get    = base + 0x33D8DA8;
+    uintptr_t slot_move   = base + 0x33D8DE8;
+    uintptr_t slot_space  = base + 0x33D8DF8;
 
-        vm_address_t page = slot & ~0x3FFFULL;
-        vm_protect(mach_task_self(), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    vm_address_t page = slot_create & ~0x3FFFULL;
+    vm_protect(mach_task_self(), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 
-        *(uintptr_t*)slot = (uintptr_t)&Hooked_getEntity;
-        NSLog(@"[RosCamboMod] Installed VTable hook at 0x%lx -> %p", slot, &Hooked_getEntity);
+    // 1. onEntityMove (Slot base + 0x33D8DE8)
+    uintptr_t fn_move = MemoryEngine::Read<uintptr_t>(slot_move);
+    if (fn_move != 0 && fn_move != (uintptr_t)&Hooked_onEntityMove) {
+        s_OrigOnEntityMove = (onEntityMove_t)fn_move;
+        *(uintptr_t*)slot_move = (uintptr_t)&Hooked_onEntityMove;
     }
+
+    // 2. onBasePlayerCreate (Slot base + 0x33D8D98)
+    uintptr_t fn_create = MemoryEngine::Read<uintptr_t>(slot_create);
+    if (fn_create != 0 && fn_create != (uintptr_t)&Hooked_onBasePlayerCreate) {
+        s_OrigOnBasePlayerCreate = (onBasePlayerCreate_t)fn_create;
+        *(uintptr_t*)slot_create = (uintptr_t)&Hooked_onBasePlayerCreate;
+    }
+
+    // 3. spaceData (Slot base + 0x33D8DF8)
+    uintptr_t fn_space = MemoryEngine::Read<uintptr_t>(slot_space);
+    if (fn_space != 0 && fn_space != (uintptr_t)&Hooked_spaceData) {
+        s_OrigSpaceData = (spaceData_t)fn_space;
+        *(uintptr_t*)slot_space = (uintptr_t)&Hooked_spaceData;
+    }
+
+    // 4. getEntity (Slot base + 0x33D8DA8)
+    uintptr_t fn_get = MemoryEngine::Read<uintptr_t>(slot_get);
+    if (fn_get != 0 && fn_get != (uintptr_t)&Hooked_getEntity) {
+        s_OrigGetEntity = (getEntity_t)fn_get;
+        *(uintptr_t*)slot_get = (uintptr_t)&Hooked_getEntity;
+    }
+}
+
+// Direct Heap Scanner for ClientApp instance (matches vtable base + 0x33D8D98 and base + 0x33D8E80)
+static uintptr_t ScanHeapForClientApp(uintptr_t base) {
+    if (!base) return 0;
+    uintptr_t expected_v1 = base + 0x33D8D98;
+    uintptr_t expected_v2 = base + 0x33D8E80;
+
+    vm_address_t address = 0;
+    vm_size_t size = 0;
+    mach_port_t object_name = MACH_PORT_NULL;
+
+    while (true) {
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        kern_return_t kr = vm_region_64(mach_task_self(), &address, &size,
+                                        VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&info, &count, &object_name);
+        if (kr != KERN_SUCCESS) break;
+
+        // Search only readable & writable regions (heap)
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) && size >= 0x1000 && size <= 0x4000000) {
+            const size_t CHUNK = 0x10000;
+            alignas(16) uint8_t buf[CHUNK];
+            for (vm_address_t cur = address; cur < address + size; cur += CHUNK) {
+                size_t to_read = std::min((size_t)(address + size - cur), CHUNK);
+                vm_size_t bytes_read = 0;
+                if (vm_read_overwrite(mach_task_self(), cur, to_read, (vm_address_t)buf, &bytes_read) == KERN_SUCCESS && bytes_read >= 16) {
+                    size_t n_ptrs = bytes_read / sizeof(uintptr_t);
+                    uintptr_t* ptrs = (uintptr_t*)buf;
+                    for (size_t p = 0; p + 1 < n_ptrs; ++p) {
+                        if (ptrs[p] == expected_v1 && ptrs[p+1] == expected_v2) {
+                            return cur + p * sizeof(uintptr_t);
+                        }
+                    }
+                }
+            }
+        }
+        address += size;
+    }
+    return 0;
+}
+
+// Scans ClientApp sub-objects for a live ViewProjection matrix
+static Matrix4x4 ScanForViewProjMatrix(uintptr_t client_app) {
+    Matrix4x4 vp{};
+    if (!MemoryEngine::IsValidAddress(client_app)) return vp;
+
+    uintptr_t candidate_ptrs[] = {
+        0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48,
+        0x88, 0x90, 0x98, 0xa0, 0xb8, 0xd0, 0x158, 0x170, 0x178, 0x2a0, 0x300
+    };
+    for (uintptr_t off : candidate_ptrs) {
+        uintptr_t sub = MemoryEngine::Read<uintptr_t>(client_app + off);
+        if (MemoryEngine::IsValidAddress(sub)) {
+            uintptr_t mat_offsets[] = { 0x0, 0x40, 0x80, 0x100, 0x140, 0x180, 0x1c0, 0x200 };
+            for (uintptr_t m_off : mat_offsets) {
+                Matrix4x4 cand = MemoryEngine::Read<Matrix4x4>(sub + m_off);
+                if (ProjectionEngine::IsValidViewProjMatrix(cand)) {
+                    return cand;
+                }
+            }
+        }
+    }
+    return vp;
 }
 
 // =============================================================================
@@ -262,6 +414,7 @@ public:
                            float& out_camera_yaw,
                            bool& out_is_firing,
                            bool& out_is_scoped) {
+        s_FrameCount++;
         out_players.clear();
         out_is_firing = g_IsTouchingFire;
         out_is_scoped = g_IsTouchingScope;
@@ -269,68 +422,70 @@ public:
         uintptr_t base = MemoryEngine::GetBaseAddress();
         if (!base) return false;
 
-        InstallVTableHook();
+        InstallVTableHooks();
+
+        // 1. Resolve ClientApp
+        if (!MemoryEngine::IsValidAddress(s_CapturedEntityManager)) {
+            if (s_FrameCount % 60 == 1) {
+                uintptr_t found = ScanHeapForClientApp(base);
+                if (found) {
+                    s_CapturedEntityManager = found;
+                }
+            }
+        }
 
         uintptr_t client_app = s_CapturedEntityManager;
-        if (!MemoryEngine::IsValidAddress(client_app)) {
-            // Check engine singleton at base + 0x339D238 for camera
-            uintptr_t eng_global = MemoryEngine::Read<uintptr_t>(base + 0x339D238);
-            if (MemoryEngine::IsValidAddress(eng_global)) {
-                uintptr_t p1 = MemoryEngine::Read<uintptr_t>(eng_global);
-                if (MemoryEngine::IsValidAddress(p1)) {
-                    uintptr_t cam = MemoryEngine::Read<uintptr_t>(p1 + 0x3E8);
-                    if (MemoryEngine::IsValidAddress(cam)) {
-                        out_vp = MemoryEngine::Read<Matrix4x4>(cam + 0x180);
-                        out_camera_yaw = MemoryEngine::Read<float>(cam + 0x210);
-                        float fov = MemoryEngine::Read<float>(cam + 0x218);
-                        if (fov > 0.0f && fov < 55.0f) out_is_scoped = true;
-                    }
-                }
-            }
-            return false;
-        }
 
-        uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
-        if (MemoryEngine::IsValidAddress(camera_obj)) {
-            out_vp = MemoryEngine::Read<Matrix4x4>(camera_obj + 0x180);
-            out_camera_yaw = MemoryEngine::Read<float>(camera_obj + 0x210);
-            float fov = MemoryEngine::Read<float>(camera_obj + 0x218);
-            if (fov > 0.0f && fov < 55.0f) {
-                out_is_scoped = true;
-            }
-        } else {
-            uintptr_t eng_global = MemoryEngine::Read<uintptr_t>(base + 0x339D238);
-            if (MemoryEngine::IsValidAddress(eng_global)) {
-                uintptr_t p1 = MemoryEngine::Read<uintptr_t>(eng_global);
-                if (MemoryEngine::IsValidAddress(p1)) {
-                    uintptr_t cam = MemoryEngine::Read<uintptr_t>(p1 + 0x3E8);
-                    if (MemoryEngine::IsValidAddress(cam)) {
-                        out_vp = MemoryEngine::Read<Matrix4x4>(cam + 0x180);
-                        out_camera_yaw = MemoryEngine::Read<float>(cam + 0x210);
-                        float fov = MemoryEngine::Read<float>(cam + 0x218);
-                        if (fov > 0.0f && fov < 55.0f) out_is_scoped = true;
-                    }
-                }
+        // 2. Resolve ViewProjection Matrix
+        if (MemoryEngine::IsValidAddress(client_app)) {
+            Matrix4x4 scanned_vp = ScanForViewProjMatrix(client_app);
+            if (ProjectionEngine::IsValidViewProjMatrix(scanned_vp)) {
+                out_vp = scanned_vp;
             }
         }
 
-        uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + 0xF98);
-        if (MemoryEngine::IsValidAddress(local_player)) {
-            out_local_pos = MemoryEngine::Read<Vector3>(local_player + 0x90);
-            out_local_team = MemoryEngine::Read<int>(local_player + 0x1C4);
+        // 3. Resolve Local Player
+        int local_id = s_CapturedLocalId;
+        if (MemoryEngine::IsValidAddress(client_app)) {
+            if (local_id <= 0) {
+                local_id = MemoryEngine::Read<int>(client_app + 0xF68);
+            }
+            uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + 0xF98);
+            if (MemoryEngine::IsValidAddress(local_player)) {
+                out_local_pos = MemoryEngine::Read<Vector3>(local_player + 0x90);
+                out_local_team = MemoryEngine::Read<int>(local_player + 0x1C4);
+            }
         }
 
-        uintptr_t entity_buckets = MemoryEngine::Read<uintptr_t>(client_app + 0xF70);
-        size_t bucket_count = MemoryEngine::Read<size_t>(client_app + 0xF78);
-        if (MemoryEngine::IsValidAddress(entity_buckets) && bucket_count > 0 && bucket_count <= 4096) {
+        if (out_local_pos.Length() < 0.1f && local_id > 0 && s_CachedEntityPositions.count(local_id)) {
+            out_local_pos = s_CachedEntityPositions[local_id].pos;
+        }
+
+        // 4. Extract Entities from Hash Map
+        if (MemoryEngine::IsValidAddress(client_app)) {
+            uintptr_t entity_buckets = MemoryEngine::Read<uintptr_t>(client_app + 0xF70);
+            size_t bucket_count = MemoryEngine::Read<size_t>(client_app + 0xF78);
+            if (MemoryEngine::IsValidAddress(entity_buckets) && bucket_count > 0 && bucket_count <= 4096) {
                 for (size_t i = 0; i < bucket_count; ++i) {
                     uintptr_t node = MemoryEngine::Read<uintptr_t>(entity_buckets + (i * sizeof(uintptr_t)));
                     while (MemoryEngine::IsValidAddress(node)) {
+                        int ent_id = MemoryEngine::Read<int>(node + 0x10);
                         uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + 0x18);
-                        if (MemoryEngine::IsValidAddress(entity) && entity != local_player) {
+                        if (MemoryEngine::IsValidAddress(entity) && ent_id != local_id) {
                             RosPlayer p{};
                             p.instance = entity;
-                            p.position = MemoryEngine::Read<Vector3>(entity + 0x90);
+                            p.id = ent_id;
+
+                            // Position resolution: cached from onEntityMove or object offset
+                            if (s_CachedEntityPositions.count(ent_id)) {
+                                p.position = s_CachedEntityPositions[ent_id].pos;
+                            } else {
+                                p.position = MemoryEngine::Read<Vector3>(entity + 0x90);
+                                if (p.position.Length() < 0.001f) {
+                                    p.position = MemoryEngine::Read<Vector3>(entity + 0x1C);
+                                }
+                            }
+
                             p.health = MemoryEngine::Read<int>(entity + 0x1B8);
                             p.max_health = MemoryEngine::Read<int>(entity + 0x1BC);
                             p.team_id = MemoryEngine::Read<int>(entity + 0x1C4);
@@ -338,42 +493,56 @@ public:
                             p.is_bot = MemoryEngine::Read<bool>(entity + 0x1D0);
 
                             if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
-                            if (p.health > 0 && p.health <= p.max_health) {
-                                float dist = (p.position - out_local_pos).Length();
-                                p.distance = dist;
+                            if (p.health <= 0 || p.health > p.max_health) p.health = 100;
 
-                                if (dist <= g_Cheat.max_esp_distance) {
-                                    uintptr_t name_ptr = MemoryEngine::Read<uintptr_t>(entity + 0x1E0);
-                                    if (MemoryEngine::IsValidAddress(name_ptr)) {
-                                        for (int c = 0; c < 63; ++c) {
-                                            p.name[c] = MemoryEngine::Read<char>(name_ptr + c);
-                                            if (p.name[c] == '\0') break;
-                                        }
-                                        p.name[63] = '\0';
-                                    }
-                                    if (p.name[0] == '\0') {
-                                        snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
-                                    }
+                            float dist = (p.position - out_local_pos).Length();
+                            p.distance = dist;
 
-                                    p.has_bones = false;
-                                    uintptr_t skeleton = MemoryEngine::Read<uintptr_t>(entity + 0x228);
-                                    if (MemoryEngine::IsValidAddress(skeleton)) {
-                                        uintptr_t bone_array = MemoryEngine::Read<uintptr_t>(skeleton + 0x48);
-                                        if (MemoryEngine::IsValidAddress(bone_array)) {
-                                            for (int b = 0; b < BONE_COUNT; ++b) {
-                                                p.bones[b] = MemoryEngine::Read<Vector3>(bone_array + (b * sizeof(Vector3)));
-                                            }
-                                            p.has_bones = true;
+                            if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
+                                snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
+
+                                p.has_bones = false;
+                                uintptr_t skeleton = MemoryEngine::Read<uintptr_t>(entity + 0x228);
+                                if (MemoryEngine::IsValidAddress(skeleton)) {
+                                    uintptr_t bone_array = MemoryEngine::Read<uintptr_t>(skeleton + 0x48);
+                                    if (MemoryEngine::IsValidAddress(bone_array)) {
+                                        for (int b = 0; b < BONE_COUNT; ++b) {
+                                            p.bones[b] = MemoryEngine::Read<Vector3>(bone_array + (b * sizeof(Vector3)));
                                         }
+                                        p.has_bones = true;
                                     }
-                                    out_players.push_back(p);
                                 }
+                                out_players.push_back(p);
                             }
                         }
                         node = MemoryEngine::Read<uintptr_t>(node + 0x00);
                     }
                 }
             }
+        }
+
+        // 5. Fallback: If hash table was empty or not populated, use live cached positions from onEntityMove
+        if (out_players.empty() && !s_CachedEntityPositions.empty()) {
+            for (const auto& kv : s_CachedEntityPositions) {
+                if (kv.first == local_id) continue;
+                if (s_FrameCount - kv.second.tick > 600) continue;
+
+                RosPlayer p{};
+                p.instance = (uintptr_t)kv.first;
+                p.id = kv.first;
+                p.position = kv.second.pos;
+                p.health = 100;
+                p.max_health = 100;
+                p.team_id = 999;
+                p.stance = 0;
+                p.is_bot = false;
+                p.has_bones = false;
+                p.distance = (p.position - out_local_pos).Length();
+                snprintf(p.name, sizeof(p.name), "Survivor #%d", kv.first);
+                out_players.push_back(p);
+            }
+        }
+
         return true;
     }
 };
@@ -972,6 +1141,9 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 ImGui::Spacing();
                 ImGui::Text("Active Target Bone: %s", (g_Cheat.aim_target_bone == 0 ? "Head" : (g_Cheat.aim_target_bone == 1 ? "Neck" : (g_Cheat.aim_target_bone == 2 ? "Chest" : "Pelvis"))));
                 ImGui::Text("Active Trigger State: %s", IsAimbotTriggerConditionMet(is_firing, is_scoped) ? "ARMED" : "IDLE");
+                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.4f, 1.0f), "ClientApp: 0x%lx", s_CapturedEntityManager);
+                ImGui::Text("Hook Hits (Move: %llu | Create: %llu)", s_MoveHookHits, s_CreateHookHits);
+                ImGui::Text("Cached Positions: %lu", s_CachedEntityPositions.size());
                 ImGui::Text("Entities Loaded: %lu", players.size());
             }
 

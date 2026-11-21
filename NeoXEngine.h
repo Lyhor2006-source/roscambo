@@ -191,22 +191,56 @@ public:
 
 class ProjectionEngine {
 public:
+    static bool IsValidViewProjMatrix(const Matrix4x4& vp) {
+        float sum_sq = 0.0f;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                float v = vp.m[r][c];
+                if (std::isnan(v) || std::isinf(v)) return false;
+                if (std::abs(v) > 50000.0f) return false;
+                sum_sq += v * v;
+            }
+        }
+        if (sum_sq < 0.5f) return false;
+        return true;
+    }
+
     static bool WorldToScreen(const Vector3& world, Vector2& screen, const Matrix4x4& vp, float screen_w, float screen_h) {
+        // Try row-major perspective projection
         float w = world.x * vp.m[0][3] + world.y * vp.m[1][3] + world.z * vp.m[2][3] + vp.m[3][3];
-        if (w < 0.05f) return false;
+        if (w >= 0.05f) {
+            float x = world.x * vp.m[0][0] + world.y * vp.m[1][0] + world.z * vp.m[2][0] + vp.m[3][0];
+            float y = world.x * vp.m[0][1] + world.y * vp.m[1][1] + world.z * vp.m[2][1] + vp.m[3][1];
 
-        float x = world.x * vp.m[0][0] + world.y * vp.m[1][0] + world.z * vp.m[2][0] + vp.m[3][0];
-        float y = world.x * vp.m[0][1] + world.y * vp.m[1][1] + world.z * vp.m[2][1] + vp.m[3][1];
+            float inv_w = 1.0f / w;
+            float ndc_x = x * inv_w;
+            float ndc_y = y * inv_w;
 
-        float inv_w = 1.0f / w;
-        float ndc_x = x * inv_w;
-        float ndc_y = y * inv_w;
+            screen.x = (screen_w * 0.5f) + (0.5f * ndc_x * screen_w);
+            screen.y = (screen_h * 0.5f) - (0.5f * ndc_y * screen_h);
 
-        screen.x = (screen_w * 0.5f) + (0.5f * ndc_x * screen_w);
-        screen.y = (screen_h * 0.5f) - (0.5f * ndc_y * screen_h);
+            return (screen.x >= -200.0f && screen.x <= screen_w + 200.0f &&
+                    screen.y >= -200.0f && screen.y <= screen_h + 200.0f);
+        }
 
-        return (screen.x >= -150.0f && screen.x <= screen_w + 150.0f &&
-                screen.y >= -150.0f && screen.y <= screen_h + 150.0f);
+        // Try column-major transpose
+        float w2 = world.x * vp.m[3][0] + world.y * vp.m[3][1] + world.z * vp.m[3][2] + vp.m[3][3];
+        if (w2 >= 0.05f) {
+            float x = world.x * vp.m[0][0] + world.y * vp.m[0][1] + world.z * vp.m[0][2] + vp.m[0][3];
+            float y = world.x * vp.m[1][0] + world.y * vp.m[1][1] + world.z * vp.m[1][2] + vp.m[1][3];
+
+            float inv_w = 1.0f / w2;
+            float ndc_x = x * inv_w;
+            float ndc_y = y * inv_w;
+
+            screen.x = (screen_w * 0.5f) + (0.5f * ndc_x * screen_w);
+            screen.y = (screen_h * 0.5f) - (0.5f * ndc_y * screen_h);
+
+            return (screen.x >= -200.0f && screen.x <= screen_w + 200.0f &&
+                    screen.y >= -200.0f && screen.y <= screen_h + 200.0f);
+        }
+
+        return false;
     }
 
     static Vector2 GetOffscreenIndicatorPos(const Vector3& local_pos, const Vector3& enemy_pos, float camera_yaw, float screen_w, float screen_h, float radius) {
