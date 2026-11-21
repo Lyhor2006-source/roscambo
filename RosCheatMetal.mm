@@ -341,9 +341,9 @@ static bool IsAimbotTriggerConditionMet(bool is_firing, bool is_scoped) {
 // =============================================================================
 static double s_LastMenuToggleTime = 0.0;
 static void SetMenuOpen(bool open) {
-    double now = ImGui::GetTime();
-    if (now - s_LastMenuToggleTime < 0.35) {
-        return; // Debounce: ignore rapid toggling within 350ms
+    double now = [NSDate date].timeIntervalSince1970;
+    if (now - s_LastMenuToggleTime < 0.25) {
+        return; // 250ms debounce
     }
     s_LastMenuToggleTime = now;
     g_Cheat.menu_open = open;
@@ -360,11 +360,26 @@ static void SetMenuOpen(bool open) {
 // =============================================================================
 static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
+    if (screenSize.width < screenSize.height) {
+        CGFloat tmp = screenSize.width;
+        screenSize.width = screenSize.height;
+        screenSize.height = tmp;
+    }
     float scale = [UIScreen mainScreen].scale;
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(screenSize.width, screenSize.height);
     io.DisplayFramebufferScale = ImVec2(scale, scale);
+
+    static double s_LastRenderTime = 0.0;
+    double cur_time = [NSDate date].timeIntervalSince1970;
+    if (s_LastRenderTime > 0.0) {
+        io.DeltaTime = (float)(cur_time - s_LastRenderTime);
+        if (io.DeltaTime <= 0.001f || io.DeltaTime > 0.1f) io.DeltaTime = 1.0f / 60.0f;
+    } else {
+        io.DeltaTime = 1.0f / 60.0f;
+    }
+    s_LastRenderTime = cur_time;
 
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = drawable.texture;
@@ -788,14 +803,11 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
             if (s_ImGuiReady) {
                 ImGuiIO& io = ImGui::GetIO();
                 if (touch.phase == UITouchPhaseBegan) {
-                    if (s_ActiveImGuiTouch == nil) {
-                        s_ActiveImGuiTouch = touch;
-                        io.MousePos = ImVec2(loc.x, loc.y);
-                        io.MouseDown[0] = true;
-                    }
+                    s_ActiveImGuiTouch = touch;
+                    io.MousePos = ImVec2(loc.x, loc.y);
+                    io.MouseDown[0] = true;
                 } else if (touch.phase == UITouchPhaseMoved) {
-                    if (s_ActiveImGuiTouch == touch || s_ActiveImGuiTouch == nil) {
-                        s_ActiveImGuiTouch = touch;
+                    if (s_ActiveImGuiTouch == touch) {
                         io.MousePos = ImVec2(loc.x, loc.y);
                     }
                 } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
@@ -808,7 +820,8 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
             }
         }
 
-        if (s_ImGuiReady && g_Cheat.menu_open && ImGui::GetIO().WantCaptureMouse) {
+        // Swallowing touches intended for ImGui (both Floating button and Dashboard)
+        if (s_ImGuiReady && ImGui::GetIO().WantCaptureMouse) {
             return;
         }
     }
@@ -829,14 +842,10 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        static id<CAMetalDrawable> s_LastRendered = nil;
-        if (s_LastRendered != metalDrawable) {
-            s_LastRendered = metalDrawable;
-            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
-            if (cmdBuffer.device) {
-                InitializeMetalOverlay(cmdBuffer.device);
-                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
-            }
+        id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+        if (cmdBuffer.device) {
+            InitializeMetalOverlay(cmdBuffer.device);
+            RenderRosCamboOverlay(cmdBuffer, metalDrawable);
         }
     }
     [self ros_presentDrawable:drawable];
@@ -845,14 +854,10 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        static id<CAMetalDrawable> s_LastRendered = nil;
-        if (s_LastRendered != metalDrawable) {
-            s_LastRendered = metalDrawable;
-            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
-            if (cmdBuffer.device) {
-                InitializeMetalOverlay(cmdBuffer.device);
-                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
-            }
+        id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+        if (cmdBuffer.device) {
+            InitializeMetalOverlay(cmdBuffer.device);
+            RenderRosCamboOverlay(cmdBuffer, metalDrawable);
         }
     }
     [self ros_presentDrawable:drawable atTime:presentationTime];
@@ -861,14 +866,10 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        static id<CAMetalDrawable> s_LastRendered = nil;
-        if (s_LastRendered != metalDrawable) {
-            s_LastRendered = metalDrawable;
-            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
-            if (cmdBuffer.device) {
-                InitializeMetalOverlay(cmdBuffer.device);
-                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
-            }
+        id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+        if (cmdBuffer.device) {
+            InitializeMetalOverlay(cmdBuffer.device);
+            RenderRosCamboOverlay(cmdBuffer, metalDrawable);
         }
     }
     [self ros_presentDrawable:drawable afterMinimumDuration:duration];
