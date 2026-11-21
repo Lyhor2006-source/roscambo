@@ -310,7 +310,29 @@ public:
     static bool WorldToScreen(const Vector3& world, Vector2& screen, const Matrix4x4& vp, float screen_w, float screen_h, uintptr_t camera_ptr = 0) {
         uintptr_t cam = camera_ptr ? camera_ptr : s_ActiveCameraPtr;
         if (cam && MemoryEngine::IsValidAddress(cam)) {
-            // Priority 1: Direct NeoX CameraBase transformation (verified ARM64 0x1010aa0e4)
+            // Priority 1: Native compiled NeoX CameraBase::worldToScreen (verified ARM64 0x1010aa0e4)
+            typedef bool (*NativeWorldToScreen_fn)(uintptr_t camera, const Vector3* world, Vector2* screen, const int* viewport);
+            static NativeWorldToScreen_fn s_NativeW2S = nullptr;
+            static bool s_NativeW2S_Resolved = false;
+            if (!s_NativeW2S_Resolved) {
+                uintptr_t base = MemoryEngine::GetBaseAddress();
+                if (base) {
+                    s_NativeW2S = (NativeWorldToScreen_fn)(base + 0x10aa0e4);
+                }
+                s_NativeW2S_Resolved = true;
+            }
+
+            if (s_NativeW2S) {
+                int viewport[4] = { 0, 0, (int)screen_w, (int)screen_h };
+                Vector2 pt;
+                if (s_NativeW2S(cam, &world, &pt, viewport)) {
+                    screen = pt;
+                    return (screen.x >= -300.0f && screen.x <= screen_w + 300.0f &&
+                            screen.y >= -300.0f && screen.y <= screen_h + 300.0f);
+                }
+            }
+
+            // Priority 2: In-line NeoX CameraBase transformation fallback (verified ARM64 0x1010aa0e4)
             struct Vector4 { float x, y, z, w; };
             Vector4 q2 = MemoryEngine::Read<Vector4>(cam + 0x40);
             Vector4 q3 = MemoryEngine::Read<Vector4>(cam + 0x50);

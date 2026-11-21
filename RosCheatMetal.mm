@@ -89,8 +89,11 @@ static RosCheatConfig g_Cheat;
 // Dynamic touch inputs
 static bool g_IsTouchingFire = false;
 static bool g_IsTouchingScope = false;
+static bool g_IsTouchingAimZone = false;
 static CGPoint g_LastTouchPos = { 0.0f, 0.0f };
 static CGPoint g_TouchDelta = { 0.0f, 0.0f };
+static bool s_AimAssistActive = false;
+static Vector2 s_ActiveAimCorrection = { 0.0f, 0.0f };
 
 // Avatar Texture Cache
 static id<MTLTexture> s_AvatarTexture = nil;
@@ -644,15 +647,17 @@ public:
         int local_id = s_CapturedLocalId;
 
         if (MemoryEngine::IsValidAddress(local_mgr)) {
-            local_player_entity = MemoryEngine::Read<uintptr_t>(local_mgr + 0x00);
-            if (MemoryEngine::IsValidAddress(local_player_entity)) {
-                Vector3 lp = MemoryEngine::Read<Vector3>(local_player_entity + NeoXOffsets::ENTITY_COORDS);
-                if (lp.Length() > 0.1f && std::abs(lp.x) < 20000.0f) {
-                    out_local_pos = lp;
-                }
-                out_local_team = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_TEAM);
-                if (local_id <= 0) {
-                    local_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_ID);
+            // In ARM64 neox, base + 0x39AB428 is directly the Entity* pointer
+            int id_check = MemoryEngine::Read<int>(local_mgr + NeoXOffsets::ENTITY_ID);
+            if (id_check > 0 && id_check < 50000000) {
+                local_player_entity = local_mgr;
+            } else {
+                uintptr_t cand = MemoryEngine::Read<uintptr_t>(local_mgr + 0x00);
+                if (MemoryEngine::IsValidAddress(cand)) {
+                    int id_cand = MemoryEngine::Read<int>(cand + NeoXOffsets::ENTITY_ID);
+                    if (id_cand > 0 && id_cand < 50000000) {
+                        local_player_entity = cand;
+                    }
                 }
             }
         }
@@ -661,17 +666,70 @@ public:
             local_id = MemoryEngine::Read<int>(client_app + NeoXOffsets::CLIENTAPP_LOCAL_PLAYER_ID);
         }
 
+        // Check active match / space state:
+        int local_space_id = 0;
+        if (MemoryEngine::IsValidAddress(local_player_entity)) {
+            local_space_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_SPACE_ID);
+            uint8_t lp_in_world = MemoryEngine::Read<uint8_t>(local_player_entity + NeoXOffsets::ENTITY_IN_WORLD);
+
+            // [CRITICAL FIX] LOBBY DETECTION:
+            // When in main menu/lobby, space_id <= 0 or inWorld == 0.
+            // Flush all stale cached entities and reject rendering completely!
+            if (local_space_id <= 0 || lp_in_world == 0) {
+                out_players.clear();
+                os_unfair_lock_lock(&s_PosCacheLock);
+                s_CachedEntityPositions.clear();
+                os_unfair_lock_unlock(&s_PosCacheLock);
+                return false;
+            }
+
+            Vector3 lp = MemoryEngine::Read<Vector3>(local_player_entity + NeoXOffsets::ENTITY_COORDS);
+            if (lp.Length() > 0.1f && std::abs(lp.x) < 25000.0f) {
+                out_local_pos = lp;
+            }
+            out_local_team = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_TEAM);
+            if (local_id <= 0) {
+                local_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_ID);
+            }
+        } else if (local_id <= 0) {
+            // Not in any active player state -> Lobby
+            out_players.clear();
+            os_unfair_lock_lock(&s_PosCacheLock);
+            s_CachedEntityPositions.clear();
+            os_unfair_lock_unlock(&s_PosCacheLock);
+            return false;
+        }
+
         if (out_local_pos.Length() < 0.1f && local_id > 0 && s_CachedEntityPositions.count(local_id)) {
             out_local_pos = s_CachedEntityPositions[local_id].pos;
         }
 
-        // 4. Extract Entities from ClientApp (All 3 Hash Tables: 0xF80, 0xFA8, 0xFD0)
+        // Purge expired cached positions (older than 90 frames / ~3 seconds)
+        os_unfair_lock_lock(&s_PosCacheLock);
+        for (auto it = s_CachedEntityPositions.begin(); it != s_CachedEntityPositions.end(); ) {
+            if (s_FrameCount > it->second.tick && (s_FrameCount - it->second.tick) > 90) {
+                it = s_CachedEntityPositions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        os_unfair_lock_unlock(&s_PosCacheLock);
+
+        // 4. Extract Avatars from ClientApp Table 2 (at client_app + 0xFA8)
+        // Table 2 (0xFA8) is m_avatars in NeoX: contains all players and bots in the match.
+        // In the Lobby, Table 2 is EMPTY. Table 1 (0xF80) has lobby UI objects (motorcycle, preview, etc.).
         if (MemoryEngine::IsValidAddress(client_app)) {
-            uintptr_t heads[] = {
-                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_FIRST_NODE),
-                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_SECOND_NODE),
-                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_THIRD_NODE)
-            };
+            uintptr_t avatars_head = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_SECOND_NODE);
+            if (!MemoryEngine::IsValidAddress(avatars_head)) {
+                // Table 2 empty -> We are in the Lobby or loading screen
+                out_players.clear();
+                os_unfair_lock_lock(&s_PosCacheLock);
+                s_CachedEntityPositions.clear();
+                os_unfair_lock_unlock(&s_PosCacheLock);
+                s_AimAssistActive = false;
+                return false;
+            }
+
             std::unordered_set<uintptr_t> visited_entities;
 
             auto process_entity_fn = [&](uintptr_t entity, int ent_id) {
@@ -684,18 +742,15 @@ public:
 
                 uint32_t uid = (uint32_t)ent_id;
 
-                // [CRITICAL FIX 1] FILTER OUT DROPPED WEAPONS, LOOT ITEMS, CRATES & SCENE PROPS
-                // NetEase entity ID layout:
-                // - 7000000..7999999 = DropItem / Weapon pickups / Ammo / Crates (e.g. 7000001..7000053)
-                // - 9000000..9999999 = Vehicles (e.g. 9000194)
+                // Filter out dropped weapons, loot crates, vehicles
                 if (uid >= 7000000 && uid < 8000000) return; // DropItem / Loot crate / Weapon
                 if (uid >= 9000000 && uid < 9999999) return; // Vehicles
 
-                // Local player detection
+                // Filter local player
                 uint8_t self_ctrl = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_SELF_CONTROLLED);
                 if (self_ctrl != 0 || entity == local_player_entity || (local_id > 0 && ent_id == local_id)) {
                     Vector3 lp = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
-                    if (lp.Length() > 0.1f && std::abs(lp.x) < 20000.0f) {
+                    if (lp.Length() > 0.1f && std::abs(lp.x) < 25000.0f) {
                         out_local_pos = lp;
                     }
                     local_player_entity = entity;
@@ -703,52 +758,29 @@ public:
                     return;
                 }
 
-                // [CRITICAL FIX 2] VERIFY ENTITY IS A VALID AVATAR / PLAYER
-                // Verified ARM64 logic from 0x100881cc0:
-                // Real players: ent_id > 0x40000000.
-                // Bots / AI players: ent_id <= 0x40000000 AND ENTITY_IS_AVATAR (0x152) != 0.
-                bool is_real_player = (uid > 0x40000000);
-                uint8_t is_av_flag = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IS_AVATAR);
-                bool is_avatar = is_real_player || (is_av_flag != 0);
-
-                // Also verify via EntityType* at entity + 0x10
-                uintptr_t type_ptr = MemoryEngine::Read<uintptr_t>(entity + NeoXOffsets::ENTITY_TYPE_PTR);
-                if (MemoryEngine::IsValidAddress(type_ptr)) {
-                    char type_name[16] = {0};
-                    uint8_t short_flag = MemoryEngine::Read<uint8_t>(type_ptr + 0x27);
-                    if ((short_flag & 0x80) == 0) {
-                        MemoryEngine::ReadBytes(type_ptr + 0x10, type_name, sizeof(type_name) - 1);
-                    } else {
-                        uintptr_t str_ptr = MemoryEngine::Read<uintptr_t>(type_ptr + 0x10);
-                        if (MemoryEngine::IsValidAddress(str_ptr)) {
-                            MemoryEngine::ReadBytes(str_ptr, type_name, sizeof(type_name) - 1);
-                        }
-                    }
-                    if (type_name[0] != '\0') {
-                        if (strcmp(type_name, "Avatar") != 0 &&
-                            strcmp(type_name, "NPCEntity") != 0 &&
-                            strcmp(type_name, "Monster") != 0) {
-                            return; // Not an avatar (weapon/drop/scene item rejected)
-                        }
-                        is_avatar = true;
-                    }
-                }
-
-                if (!is_avatar) return; // Completely ignore non-avatars
-
-                // [CRITICAL FIX 3] Active in world check (0x5D)
+                // In-world check (0x5D)
                 uint8_t in_world = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IN_WORLD);
                 if (in_world == 0) return;
 
+                // Space ID match check
+                int ent_space = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_SPACE_ID);
+                if (local_space_id > 0 && ent_space != local_space_id) return;
+
+                // Live 60 FPS coordinates directly from Entity coordinates (entity + 0x1C)
                 Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
-                os_unfair_lock_lock(&s_PosCacheLock);
-                auto it_cache = s_CachedEntityPositions.find(ent_id);
-                if (it_cache != s_CachedEntityPositions.end()) {
-                    pos = it_cache->second.pos;
+                if (pos.Length() < 1.0f || std::abs(pos.x) > 25000.0f || std::abs(pos.z) > 25000.0f) {
+                    os_unfair_lock_lock(&s_PosCacheLock);
+                    auto it_cache = s_CachedEntityPositions.find(ent_id);
+                    if (it_cache != s_CachedEntityPositions.end()) {
+                        pos = it_cache->second.pos;
+                    }
+                    os_unfair_lock_unlock(&s_PosCacheLock);
                 }
-                os_unfair_lock_unlock(&s_PosCacheLock);
 
                 if (pos.Length() >= 1.0f && std::abs(pos.x) < 25000.0f && std::abs(pos.z) < 25000.0f) {
+                    float dist = (out_local_pos.Length() > 0.1f) ? (pos - out_local_pos).Length() : 0.0f;
+                    if (g_Cheat.max_esp_distance > 0.0f && dist > g_Cheat.max_esp_distance) return;
+
                     int raw_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
                     int raw_max_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
 
@@ -760,73 +792,107 @@ public:
                     p.max_health = (raw_max_hp > 0 && raw_max_hp <= 500) ? raw_max_hp : 100;
                     p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
                     p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
-                    p.is_bot = !is_real_player;
-
-                    float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
                     p.distance = dist;
 
-                    if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
-                        if (is_real_player) {
-                            snprintf(p.name, sizeof(p.name), "Player #%d", p.id & 0xFFFF);
-                        } else {
-                            snprintf(p.name, sizeof(p.name), "[BOT] #%d", p.id % 1000);
-                        }
-
-                        // Build procedural humanoid skeleton based on position & stance
-                        p.has_bones = true;
-                        float h = (p.stance == 1) ? 1.30f : ((p.stance == 2) ? 0.60f : 1.75f);
-                        Vector3 head = p.position + Vector3(0, h, 0);
-                        p.head_pos = head;
-                        p.bones[BONE_HEAD]       = head;
-                        p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.88f, 0);
-                        p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.72f, 0);
-                        p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.48f, 0);
-                        p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] + Vector3(-0.25f, -0.05f, 0);
-                        p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] + Vector3(-0.15f, -0.22f, 0);
-                        p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
-                        p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + Vector3(0.25f, -0.05f, 0);
-                        p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + Vector3(0.15f, -0.22f, 0);
-                        p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
-                        p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] + Vector3(-0.16f, -0.06f, 0);
-                        p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
-                        p.bones[BONE_L_FOOT]     = p.bones[BONE_L_KNEE] + Vector3(0, -0.20f, 0);
-                        p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + Vector3(0.16f, -0.06f, 0);
-                        p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
-                        p.bones[BONE_R_FOOT]     = p.bones[BONE_R_KNEE] + Vector3(0, -0.20f, 0);
-
-                        out_players.push_back(p);
+                    // Resolve Player Name from Python object attributes if available
+                    char name_buf[64] = {0};
+                    static uintptr_t s_PyGetAttr = 0;
+                    if (!s_PyGetAttr) {
+                        s_PyGetAttr = MemoryEngine::GetBaseAddress() + 0x1c7b5f4;
                     }
+                    typedef uintptr_t (*PyGetAttrFn)(uintptr_t, const char*);
+                    PyGetAttrFn py_get = (PyGetAttrFn)s_PyGetAttr;
+                    if (py_get) {
+                        const char* try_props[] = { "nickname", "role_name", "name" };
+                        for (const char* prop : try_props) {
+                            uintptr_t py_str = py_get(entity, prop);
+                            if (MemoryEngine::IsValidAddress(py_str)) {
+                                char temp[64] = {0};
+                                MemoryEngine::ReadBytes(py_str + 0x20, temp, sizeof(temp) - 1);
+                                if (temp[0] >= 32 && temp[0] <= 126) {
+                                    strncpy(name_buf, temp, sizeof(name_buf) - 1);
+                                    uintptr_t ref = MemoryEngine::Read<uintptr_t>(py_str);
+                                    if (ref > 0) MemoryEngine::Write<uintptr_t>(py_str, ref - 1);
+                                    break;
+                                }
+                                uintptr_t ref = MemoryEngine::Read<uintptr_t>(py_str);
+                                if (ref > 0) MemoryEngine::Write<uintptr_t>(py_str, ref - 1);
+                            }
+                        }
+                    }
+
+                    if (name_buf[0] != '\0') {
+                        bool is_bot = (strstr(name_buf, "Bot") != nullptr ||
+                                       strstr(name_buf, "bot") != nullptr ||
+                                       strstr(name_buf, "Patrol") != nullptr);
+                        p.is_bot = is_bot;
+                        snprintf(p.name, sizeof(p.name), "%s", name_buf);
+                    } else {
+                        // In RoS-Cambo private server, default remote avatars are real players!
+                        p.is_bot = false;
+                        snprintf(p.name, sizeof(p.name), "Player #%d", ent_id % 10000);
+                    }
+
+                    // Build billboarded humanoid skeleton with ground-anchored feet
+                    p.has_bones = true;
+                    float h = (p.stance == 1) ? 1.35f : ((p.stance == 2) ? 0.65f : 1.80f);
+                    p.head_pos = p.position + Vector3(0, h, 0);
+
+                    Vector3 right_vec(cosf(out_camera_yaw), 0.0f, -sinf(out_camera_yaw));
+                    Vector3 sh_off = right_vec * 0.22f;
+                    Vector3 hip_off = right_vec * 0.15f;
+
+                    p.bones[BONE_HEAD]       = p.position + Vector3(0, h * 0.94f, 0);
+                    p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.84f, 0);
+                    p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.68f, 0);
+                    p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.45f, 0);
+                    p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] - sh_off;
+                    p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] - (sh_off * 0.4f) + Vector3(0, -0.22f, 0);
+                    p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
+                    p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + sh_off;
+                    p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + (sh_off * 0.4f) + Vector3(0, -0.22f, 0);
+                    p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
+                    p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] - hip_off;
+                    p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
+                    p.bones[BONE_L_FOOT]     = p.position - hip_off + Vector3(0, 0.05f, 0);
+                    p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + hip_off;
+                    p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
+                    p.bones[BONE_R_FOOT]     = p.position + hip_off + Vector3(0, 0.05f, 0);
+
+                    out_players.push_back(p);
                 }
             };
 
-            // 1. Traverse linked list heads (Contains all active entities with 0-overhead)
-            for (uintptr_t head : heads) {
-                uintptr_t node = head;
-                int safety = 0;
-                while (MemoryEngine::IsValidAddress(node) && ++safety < 500) {
-                    int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
-                    uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
-                    process_entity_fn(entity, ent_id);
-                    node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
-                }
+            uintptr_t node = avatars_head;
+            int safety = 0;
+            while (MemoryEngine::IsValidAddress(node) && ++safety < 500) {
+                int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
+                uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
+                process_entity_fn(entity, ent_id);
+                node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
             }
         }
 
-        // 5. Fallback: If hash table was empty, use live cached positions from onEntityMove
-        std::vector<std::pair<int, Vector3>> snapshot_positions;
-        if (out_players.empty()) {
+        // 5. Fallback: If hash table was momentarily empty, use fresh cached positions from onEntityMove
+        if (out_players.empty() && local_space_id > 0) {
+            std::vector<std::pair<int, Vector3>> snapshot_positions;
             os_unfair_lock_lock(&s_PosCacheLock);
             for (const auto& kv : s_CachedEntityPositions) {
-                snapshot_positions.push_back({kv.first, kv.second.pos});
+                if (s_FrameCount >= kv.second.tick && (s_FrameCount - kv.second.tick) <= 90) {
+                    snapshot_positions.push_back({kv.first, kv.second.pos});
+                }
             }
             os_unfair_lock_unlock(&s_PosCacheLock);
-        }
-        if (out_players.empty() && !snapshot_positions.empty()) {
+
+            Vector3 right_vec(cosf(out_camera_yaw), 0.0f, -sinf(out_camera_yaw));
+            Vector3 sh_off = right_vec * 0.22f;
+            Vector3 hip_off = right_vec * 0.15f;
+
             for (const auto& kv : snapshot_positions) {
                 if (kv.first == local_id) continue;
                 uint32_t uid = (uint32_t)kv.first;
-                if (uid >= 7000000 && uid < 8000000) continue; // Skip dropped weapons/items
-                if (uid >= 9000000 && uid < 9999999) continue; // Skip vehicles
+                if (uid >= 7000000 && uid < 8000000) continue;
+                if (uid >= 9000000 && uid < 9999999) continue;
                 if (kv.second.Length() < 1.0f) continue;
 
                 RosPlayer p{};
@@ -837,30 +903,30 @@ public:
                 p.max_health = 100;
                 p.team_id = 999;
                 p.stance = 0;
-                p.is_bot = ((uint32_t)kv.first <= 0x40000000);
-                float h = 1.75f;
+                p.is_bot = false;
+                float h = 1.80f;
                 Vector3 head = p.position + Vector3(0, h, 0);
                 p.head_pos = head;
                 p.has_bones = true;
-                p.bones[BONE_HEAD]       = head;
-                p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.88f, 0);
-                p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.72f, 0);
-                p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.48f, 0);
-                p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] + Vector3(-0.25f, -0.05f, 0);
-                p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] + Vector3(-0.15f, -0.22f, 0);
+                p.bones[BONE_HEAD]       = p.position + Vector3(0, h * 0.94f, 0);
+                p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.84f, 0);
+                p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.68f, 0);
+                p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.45f, 0);
+                p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] - sh_off;
+                p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] - (sh_off * 0.4f) + Vector3(0, -0.22f, 0);
                 p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
-                p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + Vector3(0.25f, -0.05f, 0);
-                p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + Vector3(0.15f, -0.22f, 0);
+                p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + sh_off;
+                p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + (sh_off * 0.4f) + Vector3(0, -0.22f, 0);
                 p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
-                p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] + Vector3(-0.16f, -0.06f, 0);
+                p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] - hip_off;
                 p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
-                p.bones[BONE_L_FOOT]     = p.bones[BONE_L_KNEE] + Vector3(0, -0.20f, 0);
-                p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + Vector3(0.16f, -0.06f, 0);
+                p.bones[BONE_L_FOOT]     = p.position - hip_off + Vector3(0, 0.05f, 0);
+                p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + hip_off;
                 p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
-                p.bones[BONE_R_FOOT]     = p.bones[BONE_R_KNEE] + Vector3(0, -0.20f, 0);
+                p.bones[BONE_R_FOOT]     = p.position + hip_off + Vector3(0, 0.05f, 0);
 
                 p.distance = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
-                snprintf(p.name, sizeof(p.name), "%s #%d", p.is_bot ? "[BOT]" : "Survivor", kv.first);
+                snprintf(p.name, sizeof(p.name), "Player #%d", kv.first % 10000);
                 out_players.push_back(p);
             }
         }
@@ -1210,20 +1276,33 @@ static void DrawCornerBox(ImDrawList* draw, float x, float y, float w, float h, 
     draw->AddLine(ImVec2(x + w, y + h), ImVec2(x + w, y + h - line_h), col, thickness);
 }
 
-static void RenderOffscreenRadarArrow(ImDrawList* draw, const Vector3& target_pos, const Vector3& local_pos, float camera_yaw, const Vector2& screen_center, float radius, ImU32 col) {
+static void RenderOffscreenRadarArrow(ImDrawList* draw, const Vector3& target_pos, const Vector3& local_pos, float camera_yaw, const Vector2& screen_center, CGSize screenSize, ImU32 col) {
     Vector3 diff = target_pos - local_pos;
     float target_angle = atan2f(diff.x, diff.z);
     float rel_angle = target_angle - camera_yaw;
 
-    float arrow_x = screen_center.x + sinf(rel_angle) * radius;
-    float arrow_y = screen_center.y - cosf(rel_angle) * radius;
+    float dir_x = sinf(rel_angle);
+    float dir_y = -cosf(rel_angle);
 
-    float tip_len = 14.0f;
-    float wing_w = 7.0f;
+    // Dynamic screen border clamping (26px padding from all edges)
+    float pad_x = 26.0f;
+    float pad_y = 26.0f;
+    float max_x = (screenSize.width * 0.5f) - pad_x;
+    float max_y = (screenSize.height * 0.5f) - pad_y;
 
-    Vector2 tip(arrow_x + sinf(rel_angle) * tip_len, arrow_y - cosf(rel_angle) * tip_len);
-    Vector2 left(arrow_x - cosf(rel_angle) * wing_w, arrow_y - sinf(rel_angle) * wing_w);
-    Vector2 right(arrow_x + cosf(rel_angle) * wing_w, arrow_y + sinf(rel_angle) * wing_w);
+    float scale_x = (fabsf(dir_x) > 0.001f) ? (max_x / fabsf(dir_x)) : 99999.0f;
+    float scale_y = (fabsf(dir_y) > 0.001f) ? (max_y / fabsf(dir_y)) : 99999.0f;
+    float scale = std::min(scale_x, scale_y);
+
+    float arrow_x = screen_center.x + dir_x * scale;
+    float arrow_y = screen_center.y + dir_y * scale;
+
+    float tip_len = 13.0f;
+    float wing_w = 6.5f;
+
+    Vector2 tip(arrow_x + dir_x * tip_len, arrow_y + dir_y * tip_len);
+    Vector2 left(arrow_x - dir_y * wing_w, arrow_y + dir_x * wing_w);
+    Vector2 right(arrow_x + dir_y * wing_w, arrow_y - dir_x * wing_w);
 
     draw->AddTriangleFilled(ImVec2(tip.x, tip.y), ImVec2(left.x, left.y), ImVec2(right.x, right.y), col);
 }
@@ -1241,26 +1320,7 @@ static void Apply5050SkillBlendAimbot(const Vector2& target_screen, const Vector
     }
 
     s_ActiveAimCorrection = final_correction;
-
-    if (fabsf(final_correction.x) > 0.05f || fabsf(final_correction.y) > 0.05f) {
-        float sens = 0.0018f;
-        uintptr_t base = MemoryEngine::GetBaseAddress();
-        uintptr_t local_mgr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::LOCAL_PLAYER_MGR_PTR);
-        uintptr_t lp_entity = MemoryEngine::IsValidAddress(local_mgr) ? MemoryEngine::Read<uintptr_t>(local_mgr) : 0;
-        if (MemoryEngine::IsValidAddress(lp_entity)) {
-            float cur_yaw   = MemoryEngine::Read<float>(lp_entity + NeoXOffsets::ENTITY_YAW);
-            float cur_pitch = MemoryEngine::Read<float>(lp_entity + NeoXOffsets::ENTITY_PITCH);
-
-            if (std::abs(cur_pitch) < 3.2f && std::abs(cur_yaw) < 100.0f) {
-                cur_yaw   += final_correction.x * sens;
-                cur_pitch -= final_correction.y * sens;
-                if (cur_pitch > 1.55f) cur_pitch = 1.55f;
-                if (cur_pitch < -1.55f) cur_pitch = -1.55f;
-                MemoryEngine::Write<float>(lp_entity + NeoXOffsets::ENTITY_YAW, cur_yaw);
-                MemoryEngine::Write<float>(lp_entity + NeoXOffsets::ENTITY_PITCH, cur_pitch);
-            }
-        }
-    }
+    s_AimAssistActive = (final_correction.Length() > 0.4f);
 }
 
 static bool IsAimbotTriggerConditionMet(bool is_firing, bool is_scoped) {
@@ -1272,7 +1332,7 @@ static bool IsAimbotTriggerConditionMet(bool is_firing, bool is_scoped) {
         case TRIGGER_FIRING_ONLY:
             return is_firing;
         case TRIGGER_SCOPE_AND_FIRING:
-            return (is_scoped || is_firing);
+            return (is_scoped || is_firing || g_IsTouchingAimZone);
         default:
             return true;
     }
@@ -1430,33 +1490,38 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         for (const auto& player : players) {
             if (g_Cheat.team_check && player.team_id == local_team) continue;
 
-            Vector2 head_screen, feet_screen;
-            Vector3 head_3d = player.position + Vector3(0, 1.80f, 0);
-            if (player.has_bones && player.bones[BONE_HEAD].Length() > 1.0f) {
-                head_3d = player.bones[BONE_HEAD];
-            }
+            float h_crown = (player.stance == 1 ? 1.40f : (player.stance == 2 ? 0.70f : 1.85f));
+            Vector3 crown_3d = player.position + Vector3(0, h_crown, 0);
+            Vector3 feet_3d = player.position;
 
-            bool head_w2s = ProjectionEngine::WorldToScreen(head_3d, head_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
-            bool feet_w2s = ProjectionEngine::WorldToScreen(player.position, feet_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
+            Vector2 crown_screen, feet_screen;
+            bool crown_w2s = ProjectionEngine::WorldToScreen(crown_3d, crown_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
+            bool feet_w2s  = ProjectionEngine::WorldToScreen(feet_3d, feet_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
 
             if (&player == &players[0]) {
-                g_TelemetryW2S_X = head_screen.x;
-                g_TelemetryW2S_Y = head_screen.y;
+                g_TelemetryW2S_X = crown_screen.x;
+                g_TelemetryW2S_Y = crown_screen.y;
             }
 
-            if (!head_w2s && !feet_w2s) {
-                if (g_Cheat.esp_offscreen_360) {
+            if (!crown_w2s && !feet_w2s) {
+                if (g_Cheat.esp_offscreen_360 && player.distance <= 250.0f) {
                     ImU32 off_col = player.is_bot ? IM_COL32(255, 180, 0, 220) : IM_COL32(255, 45, 45, 230);
-                    RenderOffscreenRadarArrow(draw, player.position, local_pos, camera_yaw, center, 140.0f, off_col);
+                    RenderOffscreenRadarArrow(draw, player.position, local_pos, camera_yaw, center, screenSize, off_col);
                 }
                 continue;
             }
 
-            float box_h = fabsf(feet_screen.y - head_screen.y);
-            if (box_h < 10.0f) box_h = 10.0f;
-            float box_w = box_h * 0.52f;
-            float box_x = head_screen.x - (box_w * 0.5f);
-            float box_y = std::min(head_screen.y, feet_screen.y);
+            if (!crown_w2s) crown_screen = Vector2(feet_screen.x, feet_screen.y - 65.0f);
+            if (!feet_w2s) feet_screen = Vector2(crown_screen.x, crown_screen.y + 65.0f);
+
+            float box_top = std::min(crown_screen.y, feet_screen.y);
+            float box_bottom = std::max(crown_screen.y, feet_screen.y);
+            float box_h = box_bottom - box_top;
+            if (box_h < 12.0f) box_h = 12.0f;
+            float box_w = box_h * 0.48f;
+            float box_center_x = (crown_screen.x + feet_screen.x) * 0.5f;
+            float box_x = box_center_x - (box_w * 0.5f);
+            float box_y = box_top;
 
             ImU32 box_color = player.is_bot ? IM_COL32(255, 180, 0, 255) : IM_COL32(255, 40, 40, 255);
 
@@ -1475,7 +1540,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 ImVec2 snap_origin(center.x, screenSize.height);
                 if (g_Cheat.snapline_pos == 1) snap_origin = ImVec2(center.x, center.y);
                 if (g_Cheat.snapline_pos == 2) snap_origin = ImVec2(center.x, 0);
-                draw->AddLine(snap_origin, ImVec2(head_screen.x, head_screen.y), box_color, g_Cheat.line_thickness);
+                draw->AddLine(snap_origin, ImVec2(box_center_x, box_bottom), box_color, g_Cheat.line_thickness);
             }
 
             if (g_Cheat.esp_health) {
@@ -1492,15 +1557,21 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
             if (g_Cheat.esp_name || g_Cheat.esp_distance) {
                 char info_buf[128];
+                const char* disp_name = player.name;
+                char tagged_name[128];
+                if (player.is_bot && strstr(player.name, "[BOT]") == nullptr) {
+                    snprintf(tagged_name, sizeof(tagged_name), "[BOT] %s", player.name);
+                    disp_name = tagged_name;
+                }
                 if (g_Cheat.esp_name && g_Cheat.esp_distance) {
-                    snprintf(info_buf, sizeof(info_buf), "%s [%.0fm]", player.name, player.distance);
+                    snprintf(info_buf, sizeof(info_buf), "%s [%.0fm]", disp_name, player.distance);
                 } else if (g_Cheat.esp_name) {
-                    snprintf(info_buf, sizeof(info_buf), "%s", player.name);
+                    snprintf(info_buf, sizeof(info_buf), "%s", disp_name);
                 } else {
                     snprintf(info_buf, sizeof(info_buf), "[%.0fm]", player.distance);
                 }
                 ImVec2 txt_sz = ImGui::CalcTextSize(info_buf);
-                draw->AddText(ImVec2(head_screen.x - (txt_sz.x * 0.5f), box_y - 16.0f), IM_COL32(255, 255, 255, 255), info_buf);
+                draw->AddText(ImVec2(box_center_x - (txt_sz.x * 0.5f), box_y - 18.0f), IM_COL32(255, 255, 255, 255), info_buf);
             }
 
             if (g_Cheat.esp_skeleton && player.has_bones) {
@@ -1515,7 +1586,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             }
 
             if (g_Cheat.aimbot_enabled) {
-                Vector3 target_3d = head_3d;
+                Vector3 target_3d = crown_3d - Vector3(0, 0.12f, 0); // Head center
                 if (player.has_bones) {
                     if (g_Cheat.aim_target_bone == BONE_NECK && player.bones[BONE_NECK].Length() > 1.0f) target_3d = player.bones[BONE_NECK];
                     if (g_Cheat.aim_target_bone == BONE_CHEST && player.bones[BONE_CHEST].Length() > 1.0f) target_3d = player.bones[BONE_CHEST];
@@ -1525,7 +1596,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 Vector2 target_2d;
                 if (ProjectionEngine::WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
                     float dist_center = (target_2d - center).Length();
-                    if (dist_center < closest_aim_dist) {
+                    if (dist_center <= g_Cheat.aim_fov && dist_center < closest_aim_dist) {
                         closest_aim_dist = dist_center;
                         aim_target = &player;
                         aim_target_screen = target_2d;
@@ -1540,8 +1611,11 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     }
 
     if (aim_target && IsAimbotTriggerConditionMet(is_firing, is_scoped)) {
-        draw->AddLine(ImVec2(center.x, center.y), ImVec2(aim_target_screen.x, aim_target_screen.y), IM_COL32(255, 50, 50, 200), 1.0f);
+        draw->AddLine(ImVec2(center.x, center.y), ImVec2(aim_target_screen.x, aim_target_screen.y), IM_COL32(255, 45, 45, 230), 1.2f);
         Apply5050SkillBlendAimbot(aim_target_screen, center);
+    } else {
+        s_AimAssistActive = false;
+        s_ActiveAimCorrection = Vector2(0.0f, 0.0f);
     }
 
     // =========================================================================
@@ -1653,6 +1727,31 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 @end
 
 static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
+static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
+
+@interface UITouch (RosAimAssist)
+@end
+
+@implementation UITouch (RosAimAssist)
++ (void)load {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Method origLoc = class_getInstanceMethod(self, @selector(locationInView:));
+        Method swizLoc = class_getInstanceMethod(self, @selector(ros_locationInView:));
+        method_exchangeImplementations(origLoc, swizLoc);
+    });
+}
+
+- (CGPoint)ros_locationInView:(UIView *)view {
+    CGPoint pt = [self ros_locationInView:view];
+    if (s_AimAssistActive && !g_Cheat.menu_open && s_ActiveAimTouch == self) {
+        float pull = (g_Cheat.aim_snap_mode == 2) ? 1.0f : ((g_Cheat.aim_snap_mode == 1) ? g_Cheat.aim_skill_ratio : 0.25f);
+        pt.x += s_ActiveAimCorrection.x * pull;
+        pt.y += s_ActiveAimCorrection.y * pull;
+    }
+    return pt;
+}
+@end
 
 @implementation UIWindow (RosTouchHook)
 + (void)load {
@@ -1700,6 +1799,11 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
                 g_TouchDelta = CGPointMake(loc.x - g_LastTouchPos.x, loc.y - g_LastTouchPos.y);
                 g_LastTouchPos = loc;
 
+                if (loc.x > screenSize.width * 0.35f) {
+                    s_ActiveAimTouch = touch;
+                    g_IsTouchingAimZone = true;
+                }
+
                 if (loc.x > screenSize.width * 0.70f && loc.y < screenSize.height * 0.50f) {
                     g_IsTouchingScope = true;
                 }
@@ -1708,6 +1812,10 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
                     g_IsTouchingFire = true;
                 }
             } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+                if (s_ActiveAimTouch == touch) {
+                    s_ActiveAimTouch = nil;
+                    g_IsTouchingAimZone = false;
+                }
                 g_IsTouchingFire = false;
                 g_IsTouchingScope = false;
                 g_TouchDelta = (CGPoint){ 0.0f, 0.0f };
