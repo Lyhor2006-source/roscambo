@@ -82,7 +82,7 @@ namespace Menu
         colors[ImGuiCol_Separator]             = ImVec4(0.18f, 0.24f, 0.36f, 0.60f);
         colors[ImGuiCol_Tab]                   = ImVec4(0.10f, 0.14f, 0.20f, 0.80f);
         colors[ImGuiCol_TabHovered]            = ImVec4(0.00f, 0.60f, 0.90f, 0.75f);
-        colors[ImGuiCol_TabActive]             = ImVec4(0.00f, 0.70f, 1.00f, 1.00f);
+        colors[ImGuiCol_TabSelected]           = ImVec4(0.00f, 0.70f, 1.00f, 1.00f);
     }
 
     // iOS Style Switch Toggle

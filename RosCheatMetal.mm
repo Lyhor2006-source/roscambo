@@ -1725,7 +1725,6 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         else enemy_count++;
     }
     bool is_battle = (players.size() > 0 || (has_bridge && snap.entity_count > 0));
-    ImGuiIO& io = ImGui::GetIO();
     Menu::RenderDynamicIsland(&g_Cheat.menu_open, enemy_count, bot_count, is_battle, io.Framerate);
     Menu::Render(&g_Cheat.menu_open);
 

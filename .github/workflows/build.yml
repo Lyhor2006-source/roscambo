@@ -26,7 +26,7 @@ jobs:
 
       - name: Install ldid
         run: |
-          sudo apt-get install -y libssl-dev
+          sudo apt-get install -y libssl-dev libplist-dev
           git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ~/ldid
           cd ~/ldid && make && sudo cp ldid /usr/local/bin/ && cd -
           ldid -v || true
