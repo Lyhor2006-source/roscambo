@@ -27,6 +27,7 @@
 #include <atomic>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_metal.h"
 #include "NeoXEngine.h"
 #include "ImGuiTheme.h"
