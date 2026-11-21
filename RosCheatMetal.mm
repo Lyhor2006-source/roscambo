@@ -1398,6 +1398,6 @@ static void InstallMetalPresentHooks() {
 
 __attribute__((constructor)) static void Entry() {
     InstallMetalPresentHooks();
-    InstallVTableHook();
+    InstallVTableHooks();
     NSLog(@"[RosCamboMod] Loaded with Metal Present Hook, VTable Entity Interceptor, Circular Avatar & Gesture Support.");
 }
