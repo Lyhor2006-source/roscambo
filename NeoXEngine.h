@@ -62,22 +62,25 @@ namespace NeoXOffsets {
     // Engine Singletons:
     constexpr uintptr_t DIRECTOR_GLOBAL_PTR       = 0x3A66CD8; // cocos2d::Director::getInstance() (0x100ed1e20)
     constexpr uintptr_t LOCAL_PLAYER_MGR_PTR       = 0x39AB428; // Local Player Manager singleton (0x10089a794)
-    constexpr uintptr_t CLIENTAPP_GLOBAL_PTR       = 0x44C46B8; // Global ClientApp pointer
+    constexpr uintptr_t CLIENTAPP_GLOBAL_PTR       = 0x37809F0; // Verified ClientApp pointer in __DATA/__data (from 0x100899b64)
+    constexpr uintptr_t CAMERA_GLOBAL_POOL         = 0x44CA9E0; // std::vector<Camera*> pool (0x100ec8a38)
 
     // cocos2d::Director & Scene:
-    constexpr uintptr_t DIRECTOR_RUNNING_SCENE     = 0x148;     // Director::_runningScene
+    constexpr uintptr_t DIRECTOR_RUNNING_SCENE     = 0x1A0;     // Director::_runningScene (0x100ed33bc: ldr x0, [x0, #0x1a0])
     constexpr uintptr_t SCENE_CAMERAS_BEGIN        = 0x220;     // Scene::_cameras begin
     constexpr uintptr_t SCENE_CAMERAS_END          = 0x228;     // Scene::_cameras end
 
     // cocos2d::Camera:
-    constexpr uintptr_t CAMERA_VIEW_PROJ           = 0x2E8;     // Mat4 _viewProjection (64 bytes)
+    constexpr uintptr_t CAMERA_VIEW_PROJ           = 0x2E8;     // Mat4 _viewProjection (64 bytes, 0x100e48b88)
     constexpr uintptr_t CAMERA_VIEW                = 0x228;     // Mat4 _view
     constexpr uintptr_t CAMERA_PROJ                = 0x268;     // Mat4 _projection
-    constexpr uintptr_t CAMERA_FLAG                = 0x352;     // uint16_t _cameraFlag (1=Default/2D, 2=User1/3D)
+    constexpr uintptr_t CAMERA_FLAG                = 0x352;     // uint16_t _cameraFlag (1=Default/2D, 2/4=User1/3D)
 
     // Inside ClientApp:
     constexpr uintptr_t CLIENTAPP_LOCAL_PLAYER_ID  = 0xF68;     // str w1, [x0, #0xf68]
-    constexpr uintptr_t CLIENTAPP_ENTITY_BUCKETS    = 0xF70;     // ldr x11, [x0, #0xf70] (std::unordered_map)
+    constexpr uintptr_t CLIENTAPP_FIRST_NODE       = 0xF80;     // ldr x22, [x19, #0xf80] (First entity linked list head)
+    constexpr uintptr_t CLIENTAPP_SECOND_NODE      = 0xFD0;     // ldr x21, [x19, #0xfd0] (Second entity linked list head)
+    constexpr uintptr_t CLIENTAPP_ENTITY_BUCKETS   = 0xF70;     // ldr x11, [x0, #0xf70] (std::unordered_map)
     constexpr uintptr_t CLIENTAPP_BUCKET_COUNT     = 0xF78;     // ldr x9,  [x0, #0xf78]
 
     // Inside std::unordered_map Node (LLVM libc++ hash node):

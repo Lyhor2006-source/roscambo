@@ -16,6 +16,7 @@
 #include <string>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -238,6 +239,8 @@ typedef uintptr_t (*getEntity_t)(uintptr_t this_ptr, int id);
 static getEntity_t s_OrigGetEntity = nullptr;
 
 static uintptr_t s_CapturedEntityManager = 0;
+static uintptr_t s_ActiveCamera = 0;
+static Vector2 s_ActiveAimCorrection = { 0.0f, 0.0f };
 static int s_CapturedLocalId = -1;
 static uint64_t s_MoveHookHits = 0;
 static uint64_t s_CreateHookHits = 0;
@@ -353,12 +356,13 @@ static uintptr_t ScanHeapForClientApp(uintptr_t base) {
                                         (vm_region_info_t)&info, &count, &object_name);
         if (kr != KERN_SUCCESS) break;
 
-        // Search only readable & writable regions (heap)
-        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) && size >= 0x1000 && size <= 0x4000000) {
+        // Search readable & writable regions (heap)
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) && size >= 0x1000) {
             const size_t CHUNK = 0x10000;
             alignas(16) uint8_t buf[CHUNK];
-            for (vm_address_t cur = address; cur < address + size; cur += CHUNK) {
-                size_t to_read = std::min((size_t)(address + size - cur), CHUNK);
+            size_t max_scan = std::min((size_t)size, (size_t)0x2000000);
+            for (vm_address_t cur = address; cur < address + max_scan; cur += CHUNK) {
+                size_t to_read = std::min((size_t)(address + max_scan - cur), CHUNK);
                 vm_size_t bytes_read = 0;
                 if (vm_read_overwrite(mach_task_self(), cur, to_read, (vm_address_t)buf, &bytes_read) == KERN_SUCCESS && bytes_read >= 16) {
                     size_t n_ptrs = bytes_read / sizeof(uintptr_t);
@@ -422,55 +426,73 @@ public:
 
         InstallVTableHooks();
 
-        // 1. Resolve ViewProjection Matrix from cocos2d::Director -> Scene -> Cameras
-        uintptr_t director_ptr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::DIRECTOR_GLOBAL_PTR);
-        if (MemoryEngine::IsValidAddress(director_ptr)) {
-            uintptr_t scene_ptr = MemoryEngine::Read<uintptr_t>(director_ptr + NeoXOffsets::DIRECTOR_RUNNING_SCENE);
-            if (MemoryEngine::IsValidAddress(scene_ptr)) {
-                uintptr_t cam_begin = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_BEGIN);
-                uintptr_t cam_end = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_END);
-                bool found_3d_cam = false;
+        // 1. Resolve ViewProjection Matrix:
+        // Priority 1: Cocos2d Camera Global Pool (base + 0x44CA9E0)
+        uintptr_t cam_pool = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CAMERA_GLOBAL_POOL);
+        if (MemoryEngine::IsValidAddress(cam_pool)) {
+            uintptr_t cam_begin = MemoryEngine::Read<uintptr_t>(cam_pool + 0x00);
+            uintptr_t cam_end   = MemoryEngine::Read<uintptr_t>(cam_pool + 0x08);
+            if (MemoryEngine::IsValidAddress(cam_begin) && cam_end >= cam_begin && (cam_end - cam_begin) <= 32 * sizeof(uintptr_t)) {
+                size_t count = (cam_end - cam_begin) / sizeof(uintptr_t);
+                uintptr_t fallback_cam = 0;
+                Matrix4x4 fallback_vp{};
+                for (size_t c = 0; c < count; ++c) {
+                    uintptr_t cam = MemoryEngine::Read<uintptr_t>(cam_begin + c * sizeof(uintptr_t));
+                    if (MemoryEngine::IsValidAddress(cam)) {
+                        uint16_t flag = MemoryEngine::Read<uint16_t>(cam + NeoXOffsets::CAMERA_FLAG);
+                        Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
+                        if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                            if (flag != 1) { // 3D user camera
+                                out_vp = cam_vp;
+                                s_ActiveCamera = cam;
+                                break;
+                            } else if (fallback_cam == 0) {
+                                fallback_cam = cam;
+                                fallback_vp = cam_vp;
+                            }
+                        }
+                    }
+                }
+                if (!ProjectionEngine::IsValidViewProjMatrix(out_vp) && fallback_cam != 0) {
+                    out_vp = fallback_vp;
+                    s_ActiveCamera = fallback_cam;
+                }
+            }
+        }
 
-                if (MemoryEngine::IsValidAddress(cam_begin) && cam_end > cam_begin && (cam_end - cam_begin) <= 32 * sizeof(uintptr_t)) {
-                    size_t cam_count = (cam_end - cam_begin) / sizeof(uintptr_t);
-                    // Pass 1: Prioritize 3D camera (flag != 1, e.g. USER1)
-                    for (size_t c = 0; c < cam_count; ++c) {
-                        uintptr_t cam = MemoryEngine::Read<uintptr_t>(cam_begin + (c * sizeof(uintptr_t)));
-                        if (MemoryEngine::IsValidAddress(cam)) {
-                            uint16_t flag = MemoryEngine::Read<uint16_t>(cam + NeoXOffsets::CAMERA_FLAG);
-                            if (flag != 1) {
-                                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
-                                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
-                                    out_vp = cam_vp;
-                                    found_3d_cam = true;
-                                    break;
+        // Priority 2: cocos2d::Director -> Scene (offset 0x1A0) -> Cameras
+        if (!ProjectionEngine::IsValidViewProjMatrix(out_vp)) {
+            uintptr_t director_ptr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::DIRECTOR_GLOBAL_PTR);
+            if (MemoryEngine::IsValidAddress(director_ptr)) {
+                uintptr_t scene_ptr = MemoryEngine::Read<uintptr_t>(director_ptr + NeoXOffsets::DIRECTOR_RUNNING_SCENE);
+                if (MemoryEngine::IsValidAddress(scene_ptr)) {
+                    uintptr_t cam_begin = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_BEGIN);
+                    uintptr_t cam_end   = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_END);
+                    if (MemoryEngine::IsValidAddress(cam_begin) && cam_end > cam_begin && (cam_end - cam_begin) <= 32 * sizeof(uintptr_t)) {
+                        size_t cam_count = (cam_end - cam_begin) / sizeof(uintptr_t);
+                        for (size_t c = 0; c < cam_count; ++c) {
+                            uintptr_t cam = MemoryEngine::Read<uintptr_t>(cam_begin + (c * sizeof(uintptr_t)));
+                            if (MemoryEngine::IsValidAddress(cam)) {
+                                uint16_t flag = MemoryEngine::Read<uint16_t>(cam + NeoXOffsets::CAMERA_FLAG);
+                                if (flag != 1) {
+                                    Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
+                                    if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                        out_vp = cam_vp;
+                                        s_ActiveCamera = cam;
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // Pass 2: Check default camera at scene + 0x238 if 3D user camera not found
-                    if (!found_3d_cam) {
+                    if (!ProjectionEngine::IsValidViewProjMatrix(out_vp)) {
                         uintptr_t def_cam = MemoryEngine::Read<uintptr_t>(scene_ptr + 0x238);
                         if (MemoryEngine::IsValidAddress(def_cam)) {
                             Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(def_cam + NeoXOffsets::CAMERA_VIEW_PROJ);
                             if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
                                 out_vp = cam_vp;
-                                found_3d_cam = true;
-                            }
-                        }
-                    }
-
-                    // Pass 3: Any valid camera in _cameras
-                    if (!found_3d_cam) {
-                        for (size_t c = 0; c < cam_count; ++c) {
-                            uintptr_t cam = MemoryEngine::Read<uintptr_t>(cam_begin + (c * sizeof(uintptr_t)));
-                            if (MemoryEngine::IsValidAddress(cam)) {
-                                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
-                                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
-                                    out_vp = cam_vp;
-                                    break;
-                                }
+                                s_ActiveCamera = def_cam;
                             }
                         }
                     }
@@ -478,12 +500,17 @@ public:
             }
         }
 
-        // 2. Resolve ClientApp
+        // 2. Resolve ClientApp:
+        // Priority 1: Verified static pointer at base + 0x37809F0
         if (!MemoryEngine::IsValidAddress(s_CapturedEntityManager)) {
             uintptr_t global_app = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CLIENTAPP_GLOBAL_PTR);
             if (MemoryEngine::IsValidAddress(global_app)) {
-                s_CapturedEntityManager = global_app;
-            } else if (s_FrameCount % 60 == 1) {
+                uintptr_t v1 = MemoryEngine::Read<uintptr_t>(global_app);
+                if (v1 == base + 0x33D8D98) {
+                    s_CapturedEntityManager = global_app;
+                }
+            }
+            if (!s_CapturedEntityManager && s_FrameCount % 60 == 1) {
                 uintptr_t found = ScanHeapForClientApp(base);
                 if (found) {
                     s_CapturedEntityManager = found;
@@ -493,7 +520,7 @@ public:
 
         uintptr_t client_app = s_CapturedEntityManager;
 
-        // Fallback ViewProjection matrix if director camera not yet initialized
+        // Fallback ViewProjection matrix from client_app if still not resolved
         if (!ProjectionEngine::IsValidViewProjMatrix(out_vp) && MemoryEngine::IsValidAddress(client_app)) {
             Matrix4x4 scanned_vp = ScanForViewProjMatrix(client_app);
             if (ProjectionEngine::IsValidViewProjMatrix(scanned_vp)) {
@@ -501,9 +528,19 @@ public:
             }
         }
 
-        // 3. Resolve Local Player via PlayerManager singleton (0x10089a794)
+        // Camera Yaw extraction from active camera view matrix
+        if (s_ActiveCamera && MemoryEngine::IsValidAddress(s_ActiveCamera)) {
+            Matrix4x4 view_mat = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::CAMERA_VIEW);
+            if (std::abs(view_mat.m[0][0]) > 0.0001f || std::abs(view_mat.m[2][0]) > 0.0001f) {
+                out_camera_yaw = atan2f(view_mat.m[0][2], view_mat.m[2][2]);
+            }
+        }
+
+        // 3. Resolve Local Player via PlayerManager singleton (0x10089a794 / base + 0x39AB428)
         uintptr_t local_mgr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::LOCAL_PLAYER_MGR_PTR);
         uintptr_t local_player_entity = 0;
+        int local_id = s_CapturedLocalId;
+
         if (MemoryEngine::IsValidAddress(local_mgr)) {
             local_player_entity = MemoryEngine::Read<uintptr_t>(local_mgr + 0x00);
             if (MemoryEngine::IsValidAddress(local_player_entity)) {
@@ -512,10 +549,12 @@ public:
                     out_local_pos = lp;
                 }
                 out_local_team = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_TEAM);
+                if (local_id <= 0) {
+                    local_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_ID);
+                }
             }
         }
 
-        int local_id = s_CapturedLocalId;
         if (local_id <= 0 && MemoryEngine::IsValidAddress(client_app)) {
             local_id = MemoryEngine::Read<int>(client_app + NeoXOffsets::CLIENTAPP_LOCAL_PLAYER_ID);
         }
@@ -524,56 +563,81 @@ public:
             out_local_pos = s_CachedEntityPositions[local_id].pos;
         }
 
-        // 4. Extract Entities from Hash Map
+        // 4. Extract Entities from ClientApp linked lists (heads at 0xF80 and 0xFD0)
         if (MemoryEngine::IsValidAddress(client_app)) {
-            uintptr_t entity_buckets = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_ENTITY_BUCKETS);
-            size_t bucket_count = MemoryEngine::Read<size_t>(client_app + NeoXOffsets::CLIENTAPP_BUCKET_COUNT);
-            if (MemoryEngine::IsValidAddress(entity_buckets) && bucket_count > 0 && bucket_count <= 4096) {
-                for (size_t i = 0; i < bucket_count; ++i) {
-                    uintptr_t node = MemoryEngine::Read<uintptr_t>(entity_buckets + (i * sizeof(uintptr_t)));
-                    while (MemoryEngine::IsValidAddress(node)) {
-                        int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
-                        uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
-                        if (MemoryEngine::IsValidAddress(entity) && entity != local_player_entity && ent_id != local_id) {
-                            uint32_t ent_id_u = (uint32_t)ent_id;
-                            uint8_t flag_152 = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IS_AVATAR);
-                            // Verified ARM64 logic (0x100881cc0): id > 0x40000000 or avatar flag or movement hook
-                            bool is_player = (ent_id_u > 0x40000000) || (flag_152 != 0) || s_CachedEntityPositions.count(ent_id);
+            uintptr_t heads[] = {
+                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_FIRST_NODE),
+                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_SECOND_NODE)
+            };
+            std::unordered_set<uintptr_t> visited_entities;
 
-                            if (is_player) {
-                                Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
+            for (uintptr_t head : heads) {
+                uintptr_t node = head;
+                int safety = 0;
+                while (MemoryEngine::IsValidAddress(node) && ++safety < 1500) {
+                    int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
+                    uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
 
-                                if (s_CachedEntityPositions.count(ent_id)) {
-                                    pos = s_CachedEntityPositions[ent_id].pos;
-                                }
+                    if (MemoryEngine::IsValidAddress(entity) && entity != local_player_entity && ent_id != local_id && !visited_entities.count(entity)) {
+                        visited_entities.insert(entity);
+                        uint32_t ent_id_u = (uint32_t)ent_id;
+                        uint8_t flag_152 = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IS_AVATAR);
+                        bool is_player = (ent_id_u > 0x40000000) || (flag_152 != 0) || s_CachedEntityPositions.count(ent_id);
 
-                                if (pos.Length() > 1.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
-                                    RosPlayer p{};
-                                    p.instance = entity;
-                                    p.id = ent_id;
-                                    p.position = pos;
-                                    p.health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
-                                    p.max_health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
-                                    p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
-                                    p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
-                                    p.is_bot = (ent_id_u <= 0x40000000);
+                        if (is_player) {
+                            Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
+                            if (s_CachedEntityPositions.count(ent_id)) {
+                                pos = s_CachedEntityPositions[ent_id].pos;
+                            }
 
-                                    if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
-                                    if (p.health <= 0 || p.health > p.max_health) p.health = 100;
+                            if (pos.Length() > 1.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
+                                RosPlayer p{};
+                                p.instance = entity;
+                                p.id = ent_id;
+                                p.position = pos;
+                                p.health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
+                                p.max_health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
+                                p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
+                                p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
+                                p.is_bot = (ent_id_u <= 0x40000000);
 
-                                    float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
-                                    p.distance = dist;
+                                if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
+                                if (p.health <= 0 || p.health > p.max_health) p.health = 100;
 
-                                    if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
-                                        snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
-                                        p.has_bones = false;
-                                        out_players.push_back(p);
-                                    }
+                                float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
+                                p.distance = dist;
+
+                                if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
+                                    snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
+
+                                    // Build procedural humanoid skeleton based on position & stance
+                                    p.has_bones = true;
+                                    float h = (p.stance == 1) ? 1.30f : ((p.stance == 2) ? 0.60f : 1.75f);
+                                    Vector3 head = p.position + Vector3(0, h, 0);
+                                    p.head_pos = head;
+                                    p.bones[BONE_HEAD]       = head;
+                                    p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.88f, 0);
+                                    p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.72f, 0);
+                                    p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.48f, 0);
+                                    p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] + Vector3(-0.25f, -0.05f, 0);
+                                    p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] + Vector3(-0.15f, -0.22f, 0);
+                                    p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
+                                    p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + Vector3(0.25f, -0.05f, 0);
+                                    p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + Vector3(0.15f, -0.22f, 0);
+                                    p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
+                                    p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] + Vector3(-0.16f, -0.06f, 0);
+                                    p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
+                                    p.bones[BONE_L_FOOT]     = p.bones[BONE_L_KNEE] + Vector3(0, -0.20f, 0);
+                                    p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + Vector3(0.16f, -0.06f, 0);
+                                    p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
+                                    p.bones[BONE_R_FOOT]     = p.bones[BONE_R_KNEE] + Vector3(0, -0.20f, 0);
+
+                                    out_players.push_back(p);
                                 }
                             }
                         }
-                        node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
                     }
+                    node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
                 }
             }
         }
@@ -593,7 +657,27 @@ public:
                 p.team_id = 999;
                 p.stance = 0;
                 p.is_bot = ((uint32_t)kv.first <= 0x40000000);
-                p.has_bones = false;
+                float h = 1.75f;
+                Vector3 head = p.position + Vector3(0, h, 0);
+                p.head_pos = head;
+                p.has_bones = true;
+                p.bones[BONE_HEAD]       = head;
+                p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.88f, 0);
+                p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.72f, 0);
+                p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.48f, 0);
+                p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] + Vector3(-0.25f, -0.05f, 0);
+                p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] + Vector3(-0.15f, -0.22f, 0);
+                p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
+                p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + Vector3(0.25f, -0.05f, 0);
+                p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + Vector3(0.15f, -0.22f, 0);
+                p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
+                p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] + Vector3(-0.16f, -0.06f, 0);
+                p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
+                p.bones[BONE_L_FOOT]     = p.bones[BONE_L_KNEE] + Vector3(0, -0.20f, 0);
+                p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + Vector3(0.16f, -0.06f, 0);
+                p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
+                p.bones[BONE_R_FOOT]     = p.bones[BONE_R_KNEE] + Vector3(0, -0.20f, 0);
+
                 p.distance = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
                 snprintf(p.name, sizeof(p.name), "%s #%d", p.is_bot ? "[BOT]" : "Survivor", kv.first);
                 out_players.push_back(p);
@@ -677,26 +761,41 @@ static void Apply5050SkillBlendAimbot(const Vector2& target_screen, const Vector
         final_correction = aim_error;
     }
 
+    s_ActiveAimCorrection = final_correction;
+
     if (fabsf(final_correction.x) > 0.05f || fabsf(final_correction.y) > 0.05f) {
-        uintptr_t client_app = s_CapturedEntityManager;
-        if (!MemoryEngine::IsValidAddress(client_app)) {
-            uintptr_t base = MemoryEngine::GetBaseAddress();
-            client_app = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CLIENTAPP_GLOBAL_PTR);
-        }
-        uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
-        if (MemoryEngine::IsValidAddress(camera_obj)) {
-            float cur_pitch = MemoryEngine::Read<float>(camera_obj + 0x20C);
-            float cur_yaw = MemoryEngine::Read<float>(camera_obj + 0x210);
+        float sens = 0.0020f;
+        if (s_ActiveCamera && MemoryEngine::IsValidAddress(s_ActiveCamera)) {
+            float cur_pitch = MemoryEngine::Read<float>(s_ActiveCamera + 0x20C);
+            float cur_yaw   = MemoryEngine::Read<float>(s_ActiveCamera + 0x210);
 
-            float sens = 0.0022f;
-            cur_yaw += final_correction.x * sens;
-            cur_pitch -= final_correction.y * sens;
-
-            if (cur_pitch > 1.55f) cur_pitch = 1.55f;
-            if (cur_pitch < -1.55f) cur_pitch = -1.55f;
-
-            MemoryEngine::Write<float>(camera_obj + 0x20C, cur_pitch);
-            MemoryEngine::Write<float>(camera_obj + 0x210, cur_yaw);
+            if (std::abs(cur_pitch) < 3.2f && std::abs(cur_yaw) < 100.0f) {
+                cur_yaw   += final_correction.x * sens;
+                cur_pitch -= final_correction.y * sens;
+                if (cur_pitch > 1.55f) cur_pitch = 1.55f;
+                if (cur_pitch < -1.55f) cur_pitch = -1.55f;
+                MemoryEngine::Write<float>(s_ActiveCamera + 0x20C, cur_pitch);
+                MemoryEngine::Write<float>(s_ActiveCamera + 0x210, cur_yaw);
+            }
+        } else {
+            uintptr_t client_app = s_CapturedEntityManager;
+            if (!MemoryEngine::IsValidAddress(client_app)) {
+                uintptr_t base = MemoryEngine::GetBaseAddress();
+                client_app = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CLIENTAPP_GLOBAL_PTR);
+            }
+            if (MemoryEngine::IsValidAddress(client_app)) {
+                uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
+                if (MemoryEngine::IsValidAddress(camera_obj)) {
+                    float cur_pitch = MemoryEngine::Read<float>(camera_obj + 0x20C);
+                    float cur_yaw   = MemoryEngine::Read<float>(camera_obj + 0x210);
+                    cur_yaw   += final_correction.x * sens;
+                    cur_pitch -= final_correction.y * sens;
+                    if (cur_pitch > 1.55f) cur_pitch = 1.55f;
+                    if (cur_pitch < -1.55f) cur_pitch = -1.55f;
+                    MemoryEngine::Write<float>(camera_obj + 0x20C, cur_pitch);
+                    MemoryEngine::Write<float>(camera_obj + 0x210, cur_yaw);
+                }
+            }
         }
     }
 }
