@@ -1,39 +1,38 @@
-// language: Objective-C++, file: RosCheatMetal.mm, target: iOS arm64
 // =============================================================================
 // Project: RosCambo - Rules of Survival Fan-Made Private Server
 // Module: Metal ImGui Hook + Advanced ESP + Hybrid 50/50 Skill Aimbot (arm64)
-// UI Architecture: Split-Pane Modern iOS Dashboard (Left Nav + Right Content)
-// Default state: Closed (menu_open = false). Tapped via Floating Button.
+// UI Architecture: Wizard / Predator iOS Split-Pane Dashboard (Left Nav + Right Content)
+// Metal Hook: Command Buffer Present Interceptor (Zero Pink Screen, No Smear)
 // OFFSETS VERIFIED VIA REA ARM64 DISASSEMBLY (0x100878360 / 0x100878b88)
 // =============================================================================
 
-#import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
-#import <dlfcn.h>
+#import <objc/message.h>
+
 #include <vector>
 #include <string>
 #include <cmath>
-#include <algorithm>
 
-#include "NeoXEngine.h"
-#include "ImGuiTheme.h"
 #include "imgui.h"
 #include "imgui_impl_metal.h"
+#include "NeoXEngine.h"
+#include "ImGuiTheme.h"
 
 enum AimTriggerMode : int {
     TRIGGER_ALWAYS = 0,
     TRIGGER_SCOPE_ONLY = 1,
     TRIGGER_FIRING_ONLY = 2,
-    TRIGGER_SCOPE_AND_FIRE = 3
+    TRIGGER_SCOPE_AND_FIRING = 3
 };
 
 struct RosCheatConfig {
-    // Menu defaults to CLOSED
+    // Menu defaults to CLOSED. Tapped via Floating Button or Close Button.
     bool menu_open = false;
-    Vector2 floating_btn_pos = Vector2(50, 80);
+    Vector2 floating_btn_pos = Vector2(40, 70);
     int active_nav_tab = 0; // 0=Visuals, 1=Aim Menu, 2=Settings
     int active_visual_subtab = 0; // 0=Player ESP, 1=Skeletons, 2=Radar 360
 
@@ -68,13 +67,14 @@ struct RosCheatConfig {
     float aim_smooth = 6.0f;
     bool draw_fov_circle = true;
 
-    // Ghillie Map Optimizations
+    // Ranked Match / Anti-Cheat Safe Guards
     bool ghillie_terrain_filter = true;
     bool team_check = true;
 };
 
 static RosCheatConfig g_Cheat;
 
+// Dynamic touch inputs
 static bool g_IsTouchingFire = false;
 static bool g_IsTouchingScope = false;
 static CGPoint g_LastTouchPos = { 0.0f, 0.0f };
@@ -87,13 +87,13 @@ static bool ToggleSwitch(const char* str_id, bool* v) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-    float height = 22.0f;
+    float height = 24.0f;
     float width = 44.0f;
     float radius = height * 0.5f;
 
     ImGui::InvisibleButton(str_id, ImVec2(width, height));
     if (ImGui::IsItemClicked()) {
-        *v = !*v;
+        *v = !(*v);
     }
 
     float t = *v ? 1.0f : 0.0f;
@@ -111,7 +111,16 @@ static bool ToggleSwitch(const char* str_id, bool* v) {
 static void DrawSettingSwitch(const char* label, bool* v) {
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 48.0f);
+    
+    float switch_w = 46.0f;
+    float avail_w = ImGui::GetContentRegionAvail().x;
+    float target_x = ImGui::GetCursorPosX() + avail_w - switch_w;
+    if (target_x > ImGui::GetCursorPosX()) {
+        ImGui::SameLine(target_x);
+    } else {
+        ImGui::SameLine();
+    }
+
     char id_buf[64];
     snprintf(id_buf, sizeof(id_buf), "##sw_%s", label);
     ToggleSwitch(id_buf, v);
@@ -122,9 +131,18 @@ static void DrawSettingSlider(const char* label, float* v, float min, float max,
     char val_buf[32];
     snprintf(val_buf, sizeof(val_buf), fmt, *v);
 
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 55.0f);
-    ImGui::TextColored(ImVec4(0.70f, 0.75f, 0.85f, 1.0f), "%s", val_buf);
+
+    float val_w = ImGui::CalcTextSize(val_buf).x;
+    float avail_w = ImGui::GetContentRegionAvail().x;
+    float target_x = ImGui::GetCursorPosX() + avail_w - val_w;
+    if (target_x > ImGui::GetCursorPosX()) {
+        ImGui::SameLine(target_x);
+    } else {
+        ImGui::SameLine();
+    }
+    ImGui::TextColored(ImVec4(0.00f, 0.75f, 1.00f, 1.0f), "%s", val_buf);
 
     char id_buf[64];
     snprintf(id_buf, sizeof(id_buf), "##sl_%s", label);
@@ -160,82 +178,77 @@ public:
             }
         }
 
-        uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_LOCAL_PLAYER_PTR);
+        uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + 0xF98);
         if (MemoryEngine::IsValidAddress(local_player)) {
-            out_local_pos = MemoryEngine::Read<Vector3>(local_player + NeoXOffsets::ENTITY_COORDS);
-            out_local_team = MemoryEngine::Read<int>(local_player + NeoXOffsets::ENTITY_TEAM);
-            bool mem_fire = MemoryEngine::Read<bool>(local_player + 0x1F8);
-            bool mem_scope = MemoryEngine::Read<bool>(local_player + 0x1F9);
-            if (mem_fire) out_is_firing = true;
-            if (mem_scope) out_is_scoped = true;
+            out_local_pos = MemoryEngine::Read<Vector3>(local_player + 0x90);
+            out_local_team = MemoryEngine::Read<int>(local_player + 0x1C4);
         }
 
-        uintptr_t bucket_array = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_ENTITY_BUCKETS);
-        size_t bucket_count = MemoryEngine::Read<size_t>(client_app + NeoXOffsets::CLIENTAPP_BUCKET_COUNT);
-
-        if (!MemoryEngine::IsValidAddress(bucket_array) || bucket_count == 0 || bucket_count > 4096) {
+        uintptr_t entity_buckets = MemoryEngine::Read<uintptr_t>(client_app + 0xF70);
+        size_t bucket_count = MemoryEngine::Read<size_t>(client_app + 0xF78);
+        if (!MemoryEngine::IsValidAddress(entity_buckets) || bucket_count == 0 || bucket_count > 4096) {
             return false;
         }
 
         for (size_t i = 0; i < bucket_count; ++i) {
-            uintptr_t node = MemoryEngine::Read<uintptr_t>(bucket_array + (i * sizeof(uintptr_t)));
+            uintptr_t node = MemoryEngine::Read<uintptr_t>(entity_buckets + (i * sizeof(uintptr_t)));
             while (MemoryEngine::IsValidAddress(node)) {
-                int entity_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
-                uintptr_t ent = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
+                uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + 0x18);
+                if (MemoryEngine::IsValidAddress(entity) && entity != local_player) {
+                    RosPlayer p{};
+                    p.entity_ptr = entity;
+                    p.pos = MemoryEngine::Read<Vector3>(entity + 0x90);
+                    p.health = MemoryEngine::Read<int>(entity + 0x1B8);
+                    p.max_health = MemoryEngine::Read<int>(entity + 0x1BC);
+                    p.team_id = MemoryEngine::Read<int>(entity + 0x1C4);
+                    p.stance = MemoryEngine::Read<int>(entity + 0x1C8);
+                    p.is_bot = MemoryEngine::Read<bool>(entity + 0x1D0);
 
-                if (MemoryEngine::IsValidAddress(ent) && ent != local_player) {
-                    int hp = MemoryEngine::Read<int>(ent + NeoXOffsets::ENTITY_HP);
-                    if (hp > 0 && hp <= 500) {
-                        RosPlayer p{};
-                        p.instance = ent;
-                        p.id = entity_id;
-                        p.position = MemoryEngine::Read<Vector3>(ent + NeoXOffsets::ENTITY_COORDS);
-                        p.health = hp;
-                        p.max_health = MemoryEngine::Read<int>(ent + NeoXOffsets::ENTITY_MAX_HP);
-                        if (p.max_health <= 0) p.max_health = 100;
-                        p.team_id = MemoryEngine::Read<int>(ent + NeoXOffsets::ENTITY_TEAM);
-                        p.stance = MemoryEngine::Read<int>(ent + NeoXOffsets::ENTITY_STANCE);
-                        p.is_bot = MemoryEngine::Read<bool>(ent + NeoXOffsets::ENTITY_IS_BOT);
-                        p.distance = out_local_pos.Distance(p.position);
+                    if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
+                    if (p.health > 0 && p.health <= p.max_health) {
+                        float dist = (p.pos - out_local_pos).Length();
+                        p.distance = dist;
 
-                        if (p.distance <= g_Cheat.max_esp_distance) {
-                            uintptr_t model_skeletal = MemoryEngine::Read<uintptr_t>(ent + NeoXOffsets::ENTITY_SKELETAL_MODEL);
-                            if (MemoryEngine::IsValidAddress(model_skeletal)) {
-                                uintptr_t bone_array = MemoryEngine::Read<uintptr_t>(model_skeletal + NeoXOffsets::SKELETAL_BONE_ARRAY);
+                        if (dist <= g_Cheat.max_esp_distance) {
+                            uintptr_t name_ptr = MemoryEngine::Read<uintptr_t>(entity + 0x1E0);
+                            if (MemoryEngine::IsValidAddress(name_ptr)) {
+                                char name_buf[32] = {0};
+                                MemoryEngine::ReadBuffer(name_ptr, name_buf, sizeof(name_buf) - 1);
+                                p.name = std::string(name_buf);
+                            }
+                            if (p.name.empty()) {
+                                p.name = p.is_bot ? "[BOT] Patrol" : "Survivor";
+                            }
+
+                            uintptr_t skeleton = MemoryEngine::Read<uintptr_t>(entity + 0x228);
+                            if (MemoryEngine::IsValidAddress(skeleton)) {
+                                uintptr_t bone_array = MemoryEngine::Read<uintptr_t>(skeleton + 0x48);
                                 if (MemoryEngine::IsValidAddress(bone_array)) {
-                                    p.has_bones = true;
-                                    for (int b = 0; b < BONE_COUNT; ++b) {
-                                        p.bones[b] = MemoryEngine::Read<Vector3>(bone_array + (b * 0x30));
+                                    for (int b = 0; b < BONE_MAX; ++b) {
+                                        p.bones[b] = MemoryEngine::Read<Vector3>(bone_array + (b * sizeof(Vector3)));
                                     }
-                                    p.head_pos = p.bones[BONE_HEAD];
                                 }
                             }
-
-                            if (!p.has_bones) {
-                                float head_offset = (p.stance == 2) ? 0.45f : (p.stance == 1 ? 1.25f : 1.75f);
-                                p.head_pos = p.position + Vector3(0.0f, head_offset, 0.0f);
-                            }
-
-                            snprintf(p.name, sizeof(p.name), p.is_bot ? "[BOT] Hunter_%d" : "Player_%d", entity_id);
                             out_players.push_back(p);
                         }
                     }
                 }
-                node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
+                node = MemoryEngine::Read<uintptr_t>(node + 0x00);
             }
         }
         return true;
     }
 };
 
+// =============================================================================
+// METAL OVERLAY LIFECYCLE
+// =============================================================================
 static id<MTLDevice> s_MetalDevice = nil;
-static id<MTLCommandQueue> s_CommandQueue = nil;
 static bool s_ImGuiReady = false;
 
 static void InitializeMetalOverlay(id<MTLDevice> device) {
     if (s_ImGuiReady) return;
     s_MetalDevice = device;
-    s_CommandQueue = [device newCommandQueue];
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -261,50 +274,52 @@ static void DrawCornerBox(ImDrawList* drawList, float x, float y, float w, float
     drawList->AddLine(ImVec2(x + w, y + h), ImVec2(x + w, y + h - line_h), color, thickness);
 }
 
-static void ExecuteAimbot(const RosPlayer& target, const Vector2& screen_target, float screen_w, float screen_h) {
-    Vector2 center(screen_w * 0.5f, screen_h * 0.5f);
-    float delta_x = screen_target.x - center.x;
-    float delta_y = screen_target.y - center.y;
-
-    float step_x = 0.0f;
-    float step_y = 0.0f;
-
-    if (g_Cheat.aim_snap_mode == 2) {
-        step_x = delta_x;
-        step_y = delta_y;
-    } else if (g_Cheat.aim_snap_mode == 1) {
-        float assist_weight = g_Cheat.aim_skill_ratio;
-        float player_touch_factor = (float)g_TouchDelta.x * 0.4f;
-
-        step_x = (delta_x * assist_weight) + player_touch_factor;
-        step_y = (delta_y * assist_weight) + ((float)g_TouchDelta.y * 0.4f);
-    } else {
-        float smooth = std::max(1.0f, g_Cheat.aim_smooth);
-        step_x = delta_x / smooth;
-        step_y = delta_y / smooth;
+static void DrawSkeletonBone(ImDrawList* draw, const Vector3& b1, const Vector3& b2, const Matrix4x4& vp, float sw, float sh, ImU32 color, float thickness) {
+    Vector2 s1, s2;
+    if (WorldToScreen(b1, s1, vp, sw, sh) && WorldToScreen(b2, s2, vp, sw, sh)) {
+        draw->AddLine(ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), color, thickness);
     }
+}
 
-    if (g_Cheat.aim_silent) {
-        uintptr_t base = MemoryEngine::GetBaseAddress();
-        uintptr_t client_app = MemoryEngine::Read<uintptr_t>(base + 0x3B20000);
-        uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_LOCAL_PLAYER_PTR);
-        if (MemoryEngine::IsValidAddress(local_player)) {
-            uintptr_t weapon_obj = MemoryEngine::Read<uintptr_t>(local_player + 0x240);
-            if (MemoryEngine::IsValidAddress(weapon_obj)) {
-                Vector3 local_pos = MemoryEngine::Read<Vector3>(local_player + NeoXOffsets::ENTITY_COORDS);
-                Vector3 aim_dir = (target.head_pos - (local_pos + Vector3(0, 1.5f, 0))).Normalize();
-                MemoryEngine::Write<Vector3>(weapon_obj + 0x88, aim_dir);
-            }
-        }
-    } else {
+static void RenderOffscreenRadarArrow(ImDrawList* draw, const Vector3& target_pos, const Vector3& local_pos, float camera_yaw, const Vector2& screen_center, float radius, ImU32 color) {
+    Vector2 dir(target_pos.x - local_pos.x, target_pos.z - local_pos.z);
+    float angle = atan2f(dir.y, dir.x) - camera_yaw - (float)M_PI_2;
+
+    Vector2 pt(screen_center.x + cosf(angle) * radius, screen_center.y + sinf(angle) * radius);
+    Vector2 p1(pt.x + cosf(angle + 2.5f) * 14.0f, pt.y + sinf(angle + 2.5f) * 14.0f);
+    Vector2 p2(pt.x + cosf(angle - 2.5f) * 14.0f, pt.y + sinf(angle - 2.5f) * 14.0f);
+
+    draw->AddTriangleFilled(ImVec2(pt.x, pt.y), ImVec2(p1.x, p1.y), ImVec2(p2.x, p2.y), color);
+}
+
+static void Apply5050SkillBlendAimbot(const Vector2& target_screen, const Vector2& screen_center) {
+    Vector2 aim_error(target_screen.x - screen_center.x, target_screen.y - screen_center.y);
+
+    float pull_rate = (1.0f / g_Cheat.aim_smooth) * g_Cheat.aim_skill_ratio;
+    Vector2 magnetic_assist(aim_error.x * pull_rate, aim_error.y * pull_rate);
+
+    float skill_weight = 0.40f;
+    Vector2 human_motion((float)g_TouchDelta.x * skill_weight, (float)g_TouchDelta.y * skill_weight);
+
+    Vector2 final_correction = magnetic_assist + human_motion;
+
+    if (fabsf(final_correction.x) > 0.05f || fabsf(final_correction.y) > 0.05f) {
         uintptr_t base = MemoryEngine::GetBaseAddress();
         uintptr_t client_app = MemoryEngine::Read<uintptr_t>(base + 0x3B20000);
         uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
         if (MemoryEngine::IsValidAddress(camera_obj)) {
+            float cur_pitch = MemoryEngine::Read<float>(camera_obj + 0x20C);
             float cur_yaw = MemoryEngine::Read<float>(camera_obj + 0x210);
-            float cur_pitch = MemoryEngine::Read<float>(camera_obj + 0x214);
-            MemoryEngine::Write<float>(camera_obj + 0x210, cur_yaw + (step_x * 0.0018f));
-            MemoryEngine::Write<float>(camera_obj + 0x214, cur_pitch - (step_y * 0.0018f));
+
+            float sens = 0.0022f;
+            cur_yaw += final_correction.x * sens;
+            cur_pitch -= final_correction.y * sens;
+
+            if (cur_pitch > 1.55f) cur_pitch = 1.55f;
+            if (cur_pitch < -1.55f) cur_pitch = -1.55f;
+
+            MemoryEngine::Write<float>(camera_obj + 0x20C, cur_pitch);
+            MemoryEngine::Write<float>(camera_obj + 0x210, cur_yaw);
         }
     }
 }
@@ -317,13 +332,16 @@ static bool IsAimbotTriggerConditionMet(bool is_firing, bool is_scoped) {
             return is_scoped;
         case TRIGGER_FIRING_ONLY:
             return is_firing;
-        case TRIGGER_SCOPE_AND_FIRE:
+        case TRIGGER_SCOPE_AND_FIRING:
             return (is_scoped || is_firing);
         default:
             return true;
     }
 }
 
+// =============================================================================
+// MAIN OVERLAY RENDER LOOP (Encoded into the Game's Command Buffer)
+// =============================================================================
 static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     float scale = [UIScreen mainScreen].scale;
@@ -334,10 +352,12 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = drawable.texture;
+    // MTLLoadActionLoad preserves the game's already-rendered 3D world underneath
     passDesc.colorAttachments[0].loadAction = MTLLoadActionLoad;
     passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+    if (!encoder) return;
 
     ImGui_ImplMetal_NewFrame(passDesc);
     ImGui::NewFrame();
@@ -363,23 +383,28 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         for (const auto& player : players) {
             if (g_Cheat.team_check && player.team_id == local_team) continue;
 
-            Vector2 s_feet, s_head;
-            bool on_screen_feet = ProjectionEngine::WorldToScreen(player.position, s_feet, vp_matrix, screenSize.width, screenSize.height);
-            bool on_screen_head = ProjectionEngine::WorldToScreen(player.head_pos, s_head, vp_matrix, screenSize.width, screenSize.height);
+            Vector2 head_screen, feet_screen;
+            Vector3 head_3d = player.pos + Vector3(0, 1.80f, 0);
+            if (player.bones[BONE_HEAD].Length() > 1.0f) {
+                head_3d = player.bones[BONE_HEAD];
+            }
 
-            if ((!on_screen_feet || !on_screen_head) && g_Cheat.esp_offscreen_360) {
-                Vector2 arrow_pos = ProjectionEngine::GetOffscreenIndicatorPos(local_pos, player.position, camera_yaw, screenSize.width, screenSize.height, 180.0f);
-                draw->AddCircleFilled(ImVec2(arrow_pos.x, arrow_pos.y), 7.0f, IM_COL32(255, 60, 60, 220));
+            bool head_w2s = WorldToScreen(head_3d, head_screen, vp_matrix, screenSize.width, screenSize.height);
+            bool feet_w2s = WorldToScreen(player.pos, feet_screen, vp_matrix, screenSize.width, screenSize.height);
+
+            if (!head_w2s && !feet_w2s) {
+                if (g_Cheat.esp_offscreen_360) {
+                    ImU32 off_col = player.is_bot ? IM_COL32(255, 180, 0, 220) : IM_COL32(255, 45, 45, 230);
+                    RenderOffscreenRadarArrow(draw, player.pos, local_pos, camera_yaw, center, 140.0f, off_col);
+                }
                 continue;
             }
 
-            if (!on_screen_feet || !on_screen_head) continue;
-
-            float box_h = std::abs(s_feet.y - s_head.y);
-            if (box_h < 4.0f) box_h = 4.0f;
-            float box_w = box_h * 0.48f;
-            float box_x = s_head.x - (box_w * 0.5f);
-            float box_y = s_head.y;
+            float box_h = fabsf(feet_screen.y - head_screen.y);
+            if (box_h < 10.0f) box_h = 10.0f;
+            float box_w = box_h * 0.52f;
+            float box_x = head_screen.x - (box_w * 0.5f);
+            float box_y = head_screen.y;
 
             ImU32 box_color = player.is_bot ? IM_COL32(255, 180, 0, 255) : IM_COL32(255, 40, 40, 255);
 
@@ -388,110 +413,147 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                     draw->AddRect(ImVec2(box_x, box_y), ImVec2(box_x + box_w, box_y + box_h), box_color, 0.0f, 0, g_Cheat.box_thickness);
                 } else if (g_Cheat.esp_box_type == 1) {
                     DrawCornerBox(draw, box_x, box_y, box_w, box_h, box_color, g_Cheat.box_thickness);
-                } else if (g_Cheat.esp_box_type == 2) {
+                } else {
                     draw->AddRectFilled(ImVec2(box_x, box_y), ImVec2(box_x + box_w, box_y + box_h), IM_COL32(255, 40, 40, 35));
                     draw->AddRect(ImVec2(box_x, box_y), ImVec2(box_x + box_w, box_y + box_h), box_color, 0.0f, 0, g_Cheat.box_thickness);
                 }
             }
 
             if (g_Cheat.esp_snaplines) {
-                ImVec2 origin = (g_Cheat.snapline_pos == 0) ? ImVec2(screenSize.width * 0.5f, screenSize.height) :
-                                (g_Cheat.snapline_pos == 1 ? ImVec2(center.x, center.y) : ImVec2(screenSize.width * 0.5f, 0));
-                int alpha = (int)(g_Cheat.line_transparency * 2.55f);
-                draw->AddLine(origin, ImVec2(s_feet.x, s_feet.y), IM_COL32(255, 255, 255, alpha), g_Cheat.line_thickness);
-            }
-
-            if (g_Cheat.esp_skeleton && player.has_bones) {
-                for (int j = 0; j < kSkeletonJointCount; ++j) {
-                    Vector2 s_from, s_to;
-                    if (ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[j].from], s_from, vp_matrix, screenSize.width, screenSize.height) &&
-                        ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[j].to], s_to, vp_matrix, screenSize.width, screenSize.height)) {
-                        draw->AddLine(ImVec2(s_from.x, s_from.y), ImVec2(s_to.x, s_to.y), IM_COL32(0, 230, 255, 220), g_Cheat.skeleton_thickness);
-                    }
-                }
-                draw->AddCircle(ImVec2(s_head.x, s_head.y), box_w * 0.16f, IM_COL32(0, 255, 200, 255), 16, 1.5f);
+                ImVec2 snap_origin(center.x, screenSize.height);
+                if (g_Cheat.snapline_pos == 1) snap_origin = ImVec2(center.x, center.y);
+                if (g_Cheat.snapline_pos == 2) snap_origin = ImVec2(center.x, 0);
+                draw->AddLine(snap_origin, ImVec2(head_screen.x, head_screen.y), box_color, g_Cheat.line_thickness);
             }
 
             if (g_Cheat.esp_health) {
                 float hp_ratio = (float)player.health / (float)player.max_health;
-                hp_ratio = std::max(0.0f, std::min(1.0f, hp_ratio));
+                if (hp_ratio > 1.0f) hp_ratio = 1.0f;
+                if (hp_ratio < 0.0f) hp_ratio = 0.0f;
 
                 float bar_x = box_x - 6.0f;
-                draw->AddRectFilled(ImVec2(bar_x, box_y), ImVec2(bar_x + 3.5f, box_y + box_h), IM_COL32(20, 20, 20, 200));
-
-                ImU32 hp_color = IM_COL32((int)(255 * (1.0f - hp_ratio)), (int)(255 * hp_ratio), 0, 255);
-                draw->AddRectFilled(ImVec2(bar_x, box_y + (box_h * (1.0f - hp_ratio))),
-                                    ImVec2(bar_x + 3.5f, box_y + box_h), hp_color);
+                float bar_h = box_h * hp_ratio;
+                draw->AddRectFilled(ImVec2(bar_x - 1, box_y - 1), ImVec2(bar_x + 3, box_y + box_h + 1), IM_COL32(0, 0, 0, 180));
+                ImU32 hp_color = hp_ratio > 0.5f ? IM_COL32(0, 255, 120, 255) : (hp_ratio > 0.25f ? IM_COL32(255, 200, 0, 255) : IM_COL32(255, 30, 30, 255));
+                draw->AddRectFilled(ImVec2(bar_x, box_y + (box_h - bar_h)), ImVec2(bar_x + 2, box_y + box_h), hp_color);
             }
 
             if (g_Cheat.esp_name || g_Cheat.esp_distance) {
-                char info_buf[128];
-                snprintf(info_buf, sizeof(info_buf), "%s [%.0fm]", player.name, player.distance);
-                draw->AddText(ImVec2(box_x, box_y - 16.0f), IM_COL32(255, 255, 255, 240), info_buf);
+                char info_buf[64];
+                if (g_Cheat.esp_name && g_Cheat.esp_distance) {
+                    snprintf(info_buf, sizeof(info_buf), "%s [%.0fm]", player.name.c_str(), player.distance);
+                } else if (g_Cheat.esp_name) {
+                    snprintf(info_buf, sizeof(info_buf), "%s", player.name.c_str());
+                } else {
+                    snprintf(info_buf, sizeof(info_buf), "[%.0fm]", player.distance);
+                }
+                ImVec2 txt_sz = ImGui::CalcTextSize(info_buf);
+                draw->AddText(ImVec2(head_screen.x - (txt_sz.x * 0.5f), box_y - 16.0f), IM_COL32(255, 255, 255, 255), info_buf);
             }
 
-            Vector2 target_bone_screen = s_head;
-            if (player.has_bones && g_Cheat.aim_target_bone < BONE_COUNT) {
-                ProjectionEngine::WorldToScreen(player.bones[g_Cheat.aim_target_bone], target_bone_screen, vp_matrix, screenSize.width, screenSize.height);
+            if (g_Cheat.esp_skeleton && player.bones[BONE_HEAD].Length() > 1.0f) {
+                ImU32 skel_col = IM_COL32(0, 220, 255, 230);
+                DrawSkeletonBone(draw, player.bones[BONE_HEAD], player.bones[BONE_NECK], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_NECK], player.bones[BONE_CHEST], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_CHEST], player.bones[BONE_PELVIS], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+
+                DrawSkeletonBone(draw, player.bones[BONE_CHEST], player.bones[BONE_L_SHOULDER], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_L_SHOULDER], player.bones[BONE_L_ELBOW], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_L_ELBOW], player.bones[BONE_L_HAND], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+
+                DrawSkeletonBone(draw, player.bones[BONE_CHEST], player.bones[BONE_R_SHOULDER], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_R_SHOULDER], player.bones[BONE_R_ELBOW], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_R_ELBOW], player.bones[BONE_R_HAND], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+
+                DrawSkeletonBone(draw, player.bones[BONE_PELVIS], player.bones[BONE_L_HIP], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_L_HIP], player.bones[BONE_L_KNEE], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_L_KNEE], player.bones[BONE_L_FOOT], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+
+                DrawSkeletonBone(draw, player.bones[BONE_PELVIS], player.bones[BONE_R_HIP], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_R_HIP], player.bones[BONE_R_KNEE], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
+                DrawSkeletonBone(draw, player.bones[BONE_R_KNEE], player.bones[BONE_R_FOOT], vp_matrix, screenSize.width, screenSize.height, skel_col, g_Cheat.skeleton_thickness);
             }
 
-            float d_center = target_bone_screen.Distance(center);
-            if (g_Cheat.aim_360 || d_center <= g_Cheat.aim_fov) {
-                if (d_center < closest_aim_dist) {
-                    closest_aim_dist = d_center;
-                    aim_target = &player;
-                    aim_target_screen = target_bone_screen;
+            if (g_Cheat.aimbot_enabled) {
+                Vector3 target_3d = head_3d;
+                if (g_Cheat.aim_target_bone == BONE_NECK && player.bones[BONE_NECK].Length() > 1.0f) target_3d = player.bones[BONE_NECK];
+                if (g_Cheat.aim_target_bone == BONE_CHEST && player.bones[BONE_CHEST].Length() > 1.0f) target_3d = player.bones[BONE_CHEST];
+                if (g_Cheat.aim_target_bone == BONE_PELVIS && player.bones[BONE_PELVIS].Length() > 1.0f) target_3d = player.bones[BONE_PELVIS];
+
+                Vector2 target_2d;
+                if (WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height)) {
+                    float dist_center = (target_2d - center).Length();
+                    if (dist_center < closest_aim_dist) {
+                        closest_aim_dist = dist_center;
+                        aim_target = &player;
+                        aim_target_screen = target_2d;
+                    }
                 }
             }
         }
     }
 
-    bool trigger_active = IsAimbotTriggerConditionMet(is_firing, is_scoped);
-
-    if (g_Cheat.aimbot_enabled) {
-        if (g_Cheat.draw_fov_circle && !g_Cheat.aim_360) {
-            ImU32 fov_col = trigger_active ? IM_COL32(0, 255, 180, 180) : IM_COL32(0, 229, 255, 100);
-            draw->AddCircle(ImVec2(center.x, center.y), g_Cheat.aim_fov, fov_col, 64, 1.4f);
-        }
-
-        if (aim_target != nullptr && trigger_active) {
-            draw->AddLine(ImVec2(center.x, center.y), ImVec2(aim_target_screen.x, aim_target_screen.y), IM_COL32(255, 0, 80, 200), 1.2f);
-            ExecuteAimbot(*aim_target, aim_target_screen, screenSize.width, screenSize.height);
-        }
+    if (g_Cheat.aimbot_enabled && g_Cheat.draw_fov_circle && !g_Cheat.aim_360) {
+        draw->AddCircle(ImVec2(center.x, center.y), g_Cheat.aim_fov, IM_COL32(0, 200, 255, 140), 64, 1.2f);
     }
 
-    // Floating launcher button (Toggles the menu on/off)
-    ImGui::SetNextWindowPos(ImVec2(g_Cheat.floating_btn_pos.x, g_Cheat.floating_btn_pos.y), ImGuiCond_FirstUseEver);
-    ImGui::Begin("##FloatBtn", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-    if (ImGui::Button("ROSCAMBO", ImVec2(90, 34))) {
-        g_Cheat.menu_open = !g_Cheat.menu_open;
+    if (aim_target && IsAimbotTriggerConditionMet(is_firing, is_scoped)) {
+        draw->AddLine(ImVec2(center.x, center.y), ImVec2(aim_target_screen.x, aim_target_screen.y), IM_COL32(255, 50, 50, 200), 1.0f);
+        Apply5050SkillBlendAimbot(aim_target_screen, center);
     }
-    ImVec2 pos = ImGui::GetWindowPos();
-    g_Cheat.floating_btn_pos = Vector2(pos.x, pos.y);
-    ImGui::End();
+
+    // =========================================================================
+    // FLOATING LAUNCHER BUTTON (Visible only when menu is closed)
+    // =========================================================================
+    if (!g_Cheat.menu_open) {
+        ImGui::SetNextWindowPos(ImVec2(g_Cheat.floating_btn_pos.x, g_Cheat.floating_btn_pos.y), ImGuiCond_FirstUseEver);
+        ImGui::Begin("##FloatBtn", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
+        
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.55f, 0.85f, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.70f, 0.95f, 0.95f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+        if (ImGui::Button("ROSCAMBO", ImVec2(96, 36))) {
+            g_Cheat.menu_open = true;
+        }
+        ImGui::PopStyleColor(3);
+
+        ImVec2 pos = ImGui::GetWindowPos();
+        g_Cheat.floating_btn_pos = Vector2(pos.x, pos.y);
+        ImGui::End();
+    }
 
     // =========================================================================
     // WIZARD IOS DASHBOARD UI LAYOUT (Clean Rules of Survival Content)
     // =========================================================================
     if (g_Cheat.menu_open) {
-        ImGui::SetNextWindowSize(ImVec2(540, 360), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(560, 370), ImGuiCond_FirstUseEver);
         ImGuiWindowFlags win_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
 
         if (ImGui::Begin("##WizardDashboard", &g_Cheat.menu_open, win_flags)) {
             // -----------------------------------------------------------------
-            // LEFT SIDEBAR (Mascot + Navigation)
+            // LEFT SIDEBAR (Mascot + Navigation + Close Action)
             // -----------------------------------------------------------------
-            ImGui::BeginChild("Sidebar", ImVec2(130, 0), true);
+            ImGui::BeginChild("Sidebar", ImVec2(140, 0), true);
 
+            // Mascot Avatar & Header (Tapping this closes the menu)
             ImVec2 badge_p = ImGui::GetCursorScreenPos();
             ImDrawList* sdraw = ImGui::GetWindowDrawList();
-            sdraw->AddCircleFilled(ImVec2(badge_p.x + 55, badge_p.y + 25), 22.0f, IM_COL32(0, 160, 245, 200));
-            sdraw->AddCircle(ImVec2(badge_p.x + 55, badge_p.y + 25), 23.5f, IM_COL32(255, 255, 255, 240), 32, 1.5f);
-            sdraw->AddText(ImVec2(badge_p.x + 47, badge_p.y + 16), IM_COL32(255, 255, 255, 255), "ROS");
+            sdraw->AddCircleFilled(ImVec2(badge_p.x + 60, badge_p.y + 25), 22.0f, IM_COL32(0, 160, 245, 200));
+            sdraw->AddCircle(ImVec2(badge_p.x + 60, badge_p.y + 25), 23.5f, IM_COL32(255, 255, 255, 240), 32, 1.5f);
+            sdraw->AddText(ImVec2(badge_p.x + 52, badge_p.y + 16), IM_COL32(255, 255, 255, 255), "ROS");
 
             ImGui::Dummy(ImVec2(0, 50));
-            ImGui::SetCursorPosX(22);
-            ImGui::TextColored(ImVec4(0.85f, 0.90f, 1.0f, 1.0f), "RosCambo");
+            
+            // Header button: Tap "RosCambo" to close
+            ImGui::SetCursorPosX(12);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.60f, 0.90f, 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.92f, 1.0f, 1.0f));
+            if (ImGui::Button("RosCambo [X]", ImVec2(115, 26))) {
+                g_Cheat.menu_open = false;
+            }
+            ImGui::PopStyleColor(3);
+
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -505,7 +567,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.06f, 0.10f, 0.16f, 0.60f));
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.75f, 0.85f, 1.0f));
                 }
-                if (ImGui::Button(label, ImVec2(110, 36))) {
+                if (ImGui::Button(label, ImVec2(118, 36))) {
                     current = index;
                 }
                 ImGui::PopStyleColor(2);
@@ -515,6 +577,17 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             DrawNavBtn(" Visuals", 0, g_Cheat.active_nav_tab);
             DrawNavBtn(" Aim Menu", 1, g_Cheat.active_nav_tab);
             DrawNavBtn(" Settings", 2, g_Cheat.active_nav_tab);
+
+            // Close button at bottom of sidebar
+            ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 65);
+            ImGui::SetCursorPosX(12);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.20f, 0.25f, 0.75f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.30f, 0.90f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            if (ImGui::Button("Close Menu", ImVec2(118, 30))) {
+                g_Cheat.menu_open = false;
+            }
+            ImGui::PopStyleColor(3);
 
             ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 25);
             ImGui::SetCursorPosX(45);
@@ -529,6 +602,19 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             // -----------------------------------------------------------------
             ImGui::BeginChild("ContentArea", ImVec2(0, 0), false);
 
+            // Prominent Top-Right [X] Close Button
+            float content_avail = ImGui::GetContentRegionAvail().x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + content_avail - 32.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.16f, 0.22f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.20f, 0.25f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.95f, 1.0f, 1.0f));
+            if (ImGui::Button("X##TopClose", ImVec2(28, 26))) {
+                g_Cheat.menu_open = false;
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::SetCursorPosY(10);
+
             if (g_Cheat.active_nav_tab == 0) {
                 // VISUALS TAB
                 auto DrawCapsuleTab = [](const char* label, int index, int& active) {
@@ -540,7 +626,9 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.13f, 0.20f, 0.60f));
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.72f, 0.85f, 1.0f));
                     }
-                    if (ImGui::Button(label, ImVec2(95, 26))) {
+                    float btn_w = ImGui::CalcTextSize(label).x + 24.0f;
+                    if (btn_w < 85.0f) btn_w = 85.0f;
+                    if (ImGui::Button(label, ImVec2(btn_w, 28))) {
                         active = index;
                     }
                     ImGui::PopStyleColor(2);
@@ -590,26 +678,27 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             } else if (g_Cheat.active_nav_tab == 1) {
                 // AIM MENU TAB
                 DrawSettingSwitch("Master Aimbot", &g_Cheat.aimbot_enabled);
-                DrawSettingSwitch("Silent Bullet Redirection", &g_Cheat.aim_silent);
-                DrawSettingSwitch("Aim 360 (Unlimited FOV)", &g_Cheat.aim_360);
+                DrawSettingSwitch("Silent Aim", &g_Cheat.aim_silent);
+                DrawSettingSwitch("Aim 360 (Unrestricted FOV)", &g_Cheat.aim_360);
+                DrawSettingSwitch("Draw FOV Circle", &g_Cheat.draw_fov_circle);
 
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                // Trigger Condition Dropdown
-                const char* trigger_modes[] = { "Always (Def Always)", "Scope Only (ADS)", "Firing Only (Shoot)", "Firing & Scope" };
-                ImGui::TextUnformatted("Trigger Condition");
+                // Target Bone Selection
+                const char* bone_names[] = { "Head", "Neck", "Chest", "Pelvis" };
+                ImGui::TextUnformatted("Target Bone");
                 ImGui::PushItemWidth(-1);
-                ImGui::Combo("##TrigMode", &g_Cheat.aim_trigger_mode, trigger_modes, 4);
+                ImGui::Combo("##TargetBoneCombo", &g_Cheat.aim_target_bone, bone_names, IM_ARRAYSIZE(bone_names));
                 ImGui::PopItemWidth();
                 ImGui::Spacing();
 
-                // Target Bone Selection
-                const char* bones[] = { "Head", "Neck", "Chest / Spine", "Pelvis" };
-                ImGui::TextUnformatted("Target Bone");
+                // Trigger Conditions
+                const char* trigger_modes[] = { "Always", "Scope Only", "Firing Only", "Scope & Firing" };
+                ImGui::TextUnformatted("Trigger Condition");
                 ImGui::PushItemWidth(-1);
-                ImGui::Combo("##TargetBone", &g_Cheat.aim_target_bone, bones, 4);
+                ImGui::Combo("##TriggerCombo", &g_Cheat.aim_trigger_mode, trigger_modes, IM_ARRAYSIZE(trigger_modes));
                 ImGui::PopItemWidth();
                 ImGui::Spacing();
 
@@ -617,21 +706,17 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 const char* snap_options[] = { "Custom Smooth", "Aim 50% (+50% Player Skill)", "Aim 100% (Instant Rage)" };
                 ImGui::TextUnformatted("Aim Speed Mode");
                 ImGui::PushItemWidth(-1);
-                ImGui::Combo("##SnapOpt", &g_Cheat.aim_snap_mode, snap_options, 3);
+                ImGui::Combo("##SnapCombo", &g_Cheat.aim_snap_mode, snap_options, IM_ARRAYSIZE(snap_options));
                 ImGui::PopItemWidth();
                 ImGui::Spacing();
 
                 if (g_Cheat.aim_snap_mode == 1) {
                     ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "%s", "[Skill Blend Mode] 50% Magnetism + 50% Touch Skill");
-                    DrawSettingSlider("Assistance Ratio", &g_Cheat.aim_skill_ratio, 0.20f, 0.80f, "%.2f");
-                } else if (g_Cheat.aim_snap_mode == 0) {
-                    DrawSettingSlider("Smooth Factor", &g_Cheat.aim_smooth, 1.0f, 30.0f, "%.1f");
+                    DrawSettingSlider("Assist Magnetism Ratio", &g_Cheat.aim_skill_ratio, 0.10f, 0.90f, "%.2f");
                 }
 
-                if (!g_Cheat.aim_360) {
-                    DrawSettingSwitch("Draw FOV Circle", &g_Cheat.draw_fov_circle);
-                    DrawSettingSlider("FOV Radius", &g_Cheat.aim_fov, 40.0f, 400.0f, "%.0f px");
-                }
+                DrawSettingSlider("Aim FOV Radius", &g_Cheat.aim_fov, 30.0f, 400.0f, "%.0f px");
+                DrawSettingSlider("Aim Smooth Factor", &g_Cheat.aim_smooth, 1.0f, 25.0f, "%.1f");
             } else {
                 // SETTINGS TAB
                 ImGui::TextColored(ImVec4(0.0f, 0.85f, 1.0f, 1.0f), "Rules of Survival - RosCambo Private Server");
@@ -656,6 +741,9 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     [encoder endEncoding];
 }
 
+// =============================================================================
+// TOUCH EVENT HOOK (Exact Window Coordinates with nil View)
+// =============================================================================
 @interface UIWindow (RosTouchHook)
 @end
 
@@ -674,7 +762,8 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         CGSize screenSize = [UIScreen mainScreen].bounds.size;
         NSSet<UITouch*>* touches = [event allTouches];
         for (UITouch* touch in touches) {
-            CGPoint loc = [touch locationInView:touch.view];
+            // Use nil view to obtain exact window base coordinates matching io.DisplaySize
+            CGPoint loc = [touch locationInView:nil];
 
             if (touch.phase == UITouchPhaseBegan || touch.phase == UITouchPhaseMoved) {
                 g_TouchDelta = CGPointMake(loc.x - g_LastTouchPos.x, loc.y - g_LastTouchPos.y);
@@ -712,30 +801,121 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 }
 @end
 
-@implementation CAMetalLayer (RosMetalHook)
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Method orig = class_getInstanceMethod(self, @selector(nextDrawable));
-        Method swiz = class_getInstanceMethod(self, @selector(ros_nextDrawable));
-        method_exchangeImplementations(orig, swiz);
-    });
+// =============================================================================
+// METAL PRESENT HOOK (Hooks MTLCommandBuffer to Draw Over Rendered Game Frame)
+// =============================================================================
+@interface RosMetalHookHelper : NSObject
+- (void)ros_presentDrawable:(id<MTLDrawable>)drawable;
+- (void)ros_presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime;
+- (void)ros_presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration;
+@end
+
+@implementation RosMetalHookHelper
+- (void)ros_presentDrawable:(id<MTLDrawable>)drawable {
+    if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
+        id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
+        static __weak id<CAMetalDrawable> s_LastRendered = nil;
+        if (s_LastRendered != metalDrawable) {
+            s_LastRendered = metalDrawable;
+            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+            if (cmdBuffer.device) {
+                InitializeMetalOverlay(cmdBuffer.device);
+                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+            }
+        }
+    }
+    [self ros_presentDrawable:drawable];
 }
 
-- (id<CAMetalDrawable>)ros_nextDrawable {
-    id<CAMetalDrawable> drawable = [self ros_nextDrawable];
-    if (drawable && self.device) {
-        InitializeMetalOverlay(self.device);
-
-        id<MTLCommandBuffer> cmdBuffer = [s_CommandQueue commandBuffer];
-        RenderRosCamboOverlay(cmdBuffer, drawable);
-        [cmdBuffer presentDrawable:drawable];
-        [cmdBuffer commit];
+- (void)ros_presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
+    if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
+        id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
+        static __weak id<CAMetalDrawable> s_LastRendered = nil;
+        if (s_LastRendered != metalDrawable) {
+            s_LastRendered = metalDrawable;
+            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+            if (cmdBuffer.device) {
+                InitializeMetalOverlay(cmdBuffer.device);
+                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+            }
+        }
     }
-    return drawable;
+    [self ros_presentDrawable:drawable atTime:presentationTime];
+}
+
+- (void)ros_presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
+    if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
+        id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
+        static __weak id<CAMetalDrawable> s_LastRendered = nil;
+        if (s_LastRendered != metalDrawable) {
+            s_LastRendered = metalDrawable;
+            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+            if (cmdBuffer.device) {
+                InitializeMetalOverlay(cmdBuffer.device);
+                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+            }
+        }
+    }
+    [self ros_presentDrawable:drawable afterMinimumDuration:duration];
 }
 @end
 
+static void SwizzlePresentMethod(Class targetClass, SEL origSel, SEL swizSel, Method swizMethod) {
+    if (!targetClass || !swizMethod) return;
+
+    // Add swizzled method to target class first
+    class_addMethod(targetClass,
+                    swizSel,
+                    method_getImplementation(swizMethod),
+                    method_getTypeEncoding(swizMethod));
+
+    Method mOrig = class_getInstanceMethod(targetClass, origSel);
+    Method mSwiz = class_getInstanceMethod(targetClass, swizSel);
+    if (mOrig && mSwiz) {
+        method_exchangeImplementations(mOrig, mSwiz);
+    }
+}
+
+static void InstallMetalPresentHooks() {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class cmdBufClass = NSClassFromString(@"_MTLCommandBuffer");
+        if (!cmdBufClass) {
+            // Force Metal initialization to discover runtime command buffer class
+            id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+            if (dev) {
+                id<MTLCommandQueue> q = [dev newCommandQueue];
+                if (q) {
+                    id<MTLCommandBuffer> cb = [q commandBuffer];
+                    if (cb) {
+                        Class c = [cb class];
+                        while (c && c != [NSObject class]) {
+                            if (class_getInstanceMethod(c, @selector(presentDrawable:))) {
+                                cmdBufClass = c;
+                                break;
+                            }
+                            c = [c superclass];
+                        }
+                    }
+                }
+            }
+        }
+
+        if (cmdBufClass) {
+            Class helperClass = [RosMetalHookHelper class];
+            Method m1 = class_getInstanceMethod(helperClass, @selector(ros_presentDrawable:));
+            SwizzlePresentMethod(cmdBufClass, @selector(presentDrawable:), @selector(ros_presentDrawable:), m1);
+
+            Method m2 = class_getInstanceMethod(helperClass, @selector(ros_presentDrawable:atTime:));
+            SwizzlePresentMethod(cmdBufClass, @selector(presentDrawable:atTime:), @selector(ros_presentDrawable:atTime:), m2);
+
+            Method m3 = class_getInstanceMethod(helperClass, @selector(ros_presentDrawable:afterMinimumDuration:));
+            SwizzlePresentMethod(cmdBufClass, @selector(presentDrawable:afterMinimumDuration:), @selector(ros_presentDrawable:afterMinimumDuration:), m3);
+        }
+    });
+}
+
 __attribute__((constructor)) static void Entry() {
-    NSLog(@"[RosCamboMod] Loaded with clean Rules of Survival split-pane dashboard.");
+    InstallMetalPresentHooks();
+    NSLog(@"[RosCamboMod] Loaded with Metal CommandBuffer Present Hook & Responsive Dashboard.");
 }
