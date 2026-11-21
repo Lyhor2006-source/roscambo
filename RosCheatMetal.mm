@@ -307,31 +307,28 @@ static void InstallVTableHooks() {
     uintptr_t slot_space  = base + 0x33D8DF8;
 
     vm_address_t page = slot_create & ~0x3FFFULL;
-    vm_protect(mach_task_self(), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    vm_protect(mach_task_self(), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE);
 
-    // 1. onEntityMove (Slot base + 0x33D8DE8)
-    uintptr_t fn_move = MemoryEngine::Read<uintptr_t>(slot_move);
+    // Direct memory read/write for in-process vtable hooking
+    uintptr_t fn_move = *(uintptr_t*)slot_move;
     if (fn_move != 0 && fn_move != (uintptr_t)&Hooked_onEntityMove) {
         s_OrigOnEntityMove = (onEntityMove_t)fn_move;
         *(uintptr_t*)slot_move = (uintptr_t)&Hooked_onEntityMove;
     }
 
-    // 2. onBasePlayerCreate (Slot base + 0x33D8D98)
-    uintptr_t fn_create = MemoryEngine::Read<uintptr_t>(slot_create);
+    uintptr_t fn_create = *(uintptr_t*)slot_create;
     if (fn_create != 0 && fn_create != (uintptr_t)&Hooked_onBasePlayerCreate) {
         s_OrigOnBasePlayerCreate = (onBasePlayerCreate_t)fn_create;
         *(uintptr_t*)slot_create = (uintptr_t)&Hooked_onBasePlayerCreate;
     }
 
-    // 3. spaceData (Slot base + 0x33D8DF8)
-    uintptr_t fn_space = MemoryEngine::Read<uintptr_t>(slot_space);
+    uintptr_t fn_space = *(uintptr_t*)slot_space;
     if (fn_space != 0 && fn_space != (uintptr_t)&Hooked_spaceData) {
         s_OrigSpaceData = (spaceData_t)fn_space;
         *(uintptr_t*)slot_space = (uintptr_t)&Hooked_spaceData;
     }
 
-    // 4. getEntity (Slot base + 0x33D8DA8)
-    uintptr_t fn_get = MemoryEngine::Read<uintptr_t>(slot_get);
+    uintptr_t fn_get = *(uintptr_t*)slot_get;
     if (fn_get != 0 && fn_get != (uintptr_t)&Hooked_getEntity) {
         s_OrigGetEntity = (getEntity_t)fn_get;
         *(uintptr_t*)slot_get = (uintptr_t)&Hooked_getEntity;
@@ -425,9 +422,21 @@ public:
 
         InstallVTableHooks();
 
-        // 1. Resolve ClientApp
+        // 1. Resolve ViewProjection Matrix directly from Active Engine Camera
+        uintptr_t camera_ptr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CAMERA_GLOBAL_PTR);
+        if (camera_ptr > 0x100000000ULL) {
+            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(camera_ptr + NeoXOffsets::CAMERA_VIEW_PROJ);
+            if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                out_vp = cam_vp;
+            }
+        }
+
+        // 2. Resolve ClientApp (via Global Pointer, Captured Hooks, or Heap Scan)
         if (!MemoryEngine::IsValidAddress(s_CapturedEntityManager)) {
-            if (s_FrameCount % 60 == 1) {
+            uintptr_t global_app = MemoryEngine::Read<uintptr_t>(base + 0x44C46B8);
+            if (MemoryEngine::IsValidAddress(global_app)) {
+                s_CapturedEntityManager = global_app;
+            } else if (s_FrameCount % 60 == 1) {
                 uintptr_t found = ScanHeapForClientApp(base);
                 if (found) {
                     s_CapturedEntityManager = found;
@@ -437,8 +446,8 @@ public:
 
         uintptr_t client_app = s_CapturedEntityManager;
 
-        // 2. Resolve ViewProjection Matrix
-        if (MemoryEngine::IsValidAddress(client_app)) {
+        // Fallback ViewProjection matrix if camera singleton not yet initialized
+        if (!ProjectionEngine::IsValidViewProjMatrix(out_vp) && MemoryEngine::IsValidAddress(client_app)) {
             Matrix4x4 scanned_vp = ScanForViewProjMatrix(client_app);
             if (ProjectionEngine::IsValidViewProjMatrix(scanned_vp)) {
                 out_vp = scanned_vp;

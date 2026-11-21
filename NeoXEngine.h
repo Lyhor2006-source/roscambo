@@ -59,6 +59,12 @@ struct Matrix4x4 {
 // Function EntityManager::getEntity (VA 0x100878b88)
 // -----------------------------------------------------------------------------
 namespace NeoXOffsets {
+    // Engine Camera Singletons & Matrix:
+    constexpr uintptr_t CAMERA_GLOBAL_PTR          = 0x44ca8f0; // cocos2d::Camera::_visitingCamera
+    constexpr uintptr_t CAMERA_VIEW_PROJ           = 0x2e8;     // Mat4 _viewProjection (64 bytes)
+    constexpr uintptr_t CAMERA_VIEW                = 0x228;     // Mat4 _view
+    constexpr uintptr_t CAMERA_PROJ                = 0x268;     // Mat4 _projection
+
     // Inside ClientApp:
     constexpr uintptr_t CLIENTAPP_LOCAL_PLAYER_ID  = 0xf68; // str w1, [x0, #0xf68]
     constexpr uintptr_t CLIENTAPP_ENTITY_BUCKETS    = 0xf70; // ldr x11, [x0, #0xf70] (std::unordered_map)
@@ -155,23 +161,13 @@ public:
         return s_Base;
     }
 
-    static bool IsValidAddress(uintptr_t addr) {
-        if (addr < 0x100000000ULL || addr > 0x3000000000ULL) return false;
-        vm_address_t region_addr = (vm_address_t)addr;
-        vm_size_t region_size = 0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t object_name = MACH_PORT_NULL;
-        kern_return_t kr = vm_region_64(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name);
-        if (kr != KERN_SUCCESS) return false;
-        if (addr < region_addr || addr >= (region_addr + region_size)) return false;
-        if (!(info.protection & VM_PROT_READ)) return false;
-        return true;
+    static inline bool IsValidAddress(uintptr_t addr) {
+        return (addr >= 0x100000000ULL && addr <= 0x3000000000ULL);
     }
 
     template <typename T>
-    static T Read(uintptr_t addr, T fallback = T{}) {
-        if (!IsValidAddress(addr)) return fallback;
+    static inline T Read(uintptr_t addr, T fallback = T{}) {
+        if (addr < 0x100000000ULL || addr > 0x3000000000ULL) return fallback;
         T val{};
         vm_size_t bytes_read = 0;
         kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, sizeof(T), (vm_address_t)&val, &bytes_read);
@@ -182,8 +178,8 @@ public:
     }
 
     template <typename T>
-    static bool Write(uintptr_t addr, T value) {
-        if (!IsValidAddress(addr)) return false;
+    static inline bool Write(uintptr_t addr, T value) {
+        if (addr < 0x100000000ULL || addr > 0x3000000000ULL) return false;
         kern_return_t kr = vm_write(mach_task_self(), (vm_address_t)addr, (vm_offset_t)&value, sizeof(T));
         return (kr == KERN_SUCCESS);
     }

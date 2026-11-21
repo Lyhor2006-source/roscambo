@@ -16,7 +16,7 @@ namespace Menu
     struct Config
     {
         // Visuals
-        bool  espEnabled        = false;
+        bool  espEnabled        = true;
         bool  espBox            = true;
         bool  espSkeleton       = true;
         bool  espSnaplines      = false;
@@ -37,7 +37,7 @@ namespace Menu
         float radarRange        = 150.0f;  // meters
 
         // Aim
-        bool  aimEnabled        = false;
+        bool  aimEnabled        = true;
         bool  silentAim         = false;
         bool  aim360            = false;
         float aimStrength       = 50.0f;   // percent
@@ -49,7 +49,7 @@ namespace Menu
         float aimSmooth         = 6.0f;    // 1 = instant
         float aimDistance       = 300.0f;  // meters
         bool  aimDrawFov        = true;
-        bool  aimVisibleOnly    = true;
+        bool  aimVisibleOnly    = false;
 
         // Misc
         bool  recoilAdjust      = false;
