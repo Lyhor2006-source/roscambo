@@ -36,8 +36,8 @@
 enum AimTriggerMode : int {
     TRIGGER_ALWAYS = 0,
     TRIGGER_SCOPE_ONLY = 1,
-    TRIGGER_FIRING_ONLY = 2,
-    TRIGGER_SCOPE_AND_FIRING = 3
+    TRIGGER_SCOPE_AND_FIRING = 2,
+    TRIGGER_FIRING_ONLY = 3
 };
 
 struct RosCheatConfig {
@@ -642,71 +642,44 @@ public:
 
         // 3. Resolve Local Player via PlayerManager singleton (0x10089a794 / base + 0x39AB428)
         uintptr_t local_mgr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::LOCAL_PLAYER_MGR_PTR);
-        uintptr_t local_player_entity = 0;
+        uintptr_t local_player_entity = MemoryEngine::IsValidAddress(local_mgr) ? MemoryEngine::Read<uintptr_t>(local_mgr + 0x00) : 0;
         int local_id = s_CapturedLocalId;
 
-        if (MemoryEngine::IsValidAddress(local_mgr)) {
-            // In ARM64 neox, base + 0x39AB428 is directly the Entity* pointer
-            int id_check = MemoryEngine::Read<int>(local_mgr + NeoXOffsets::ENTITY_ID);
-            if (id_check > 0 && id_check < 50000000) {
-                local_player_entity = local_mgr;
-            } else {
-                uintptr_t cand = MemoryEngine::Read<uintptr_t>(local_mgr + 0x00);
-                if (MemoryEngine::IsValidAddress(cand)) {
-                    int id_cand = MemoryEngine::Read<int>(cand + NeoXOffsets::ENTITY_ID);
-                    if (id_cand > 0 && id_cand < 50000000) {
-                        local_player_entity = cand;
-                    }
-                }
+        if (MemoryEngine::IsValidAddress(local_player_entity)) {
+            Vector3 lp = MemoryEngine::Read<Vector3>(local_player_entity + NeoXOffsets::ENTITY_COORDS);
+            if (lp.Length() > 0.1f && std::abs(lp.x) < 25000.0f) {
+                out_local_pos = lp;
             }
+            out_local_team = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_TEAM);
+            int read_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_ID);
+            if (read_id > 0) local_id = read_id;
         }
 
         if (local_id <= 0 && MemoryEngine::IsValidAddress(client_app)) {
             local_id = MemoryEngine::Read<int>(client_app + NeoXOffsets::CLIENTAPP_LOCAL_PLAYER_ID);
         }
 
-        // Check active match / space state:
-        int local_space_id = 0;
-        if (MemoryEngine::IsValidAddress(local_player_entity)) {
-            local_space_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_SPACE_ID);
-            uint8_t lp_in_world = MemoryEngine::Read<uint8_t>(local_player_entity + NeoXOffsets::ENTITY_IN_WORLD);
-
-            // [CRITICAL FIX] LOBBY DETECTION:
-            // When in main menu/lobby, space_id <= 0 or inWorld == 0.
-            // Flush all stale cached entities and reject rendering completely!
-            if (local_space_id <= 0 || lp_in_world == 0) {
-                out_players.clear();
-                os_unfair_lock_lock(&s_PosCacheLock);
-                s_CachedEntityPositions.clear();
-                os_unfair_lock_unlock(&s_PosCacheLock);
-                return false;
-            }
-
-            Vector3 lp = MemoryEngine::Read<Vector3>(local_player_entity + NeoXOffsets::ENTITY_COORDS);
-            if (lp.Length() > 0.1f && std::abs(lp.x) < 25000.0f) {
-                out_local_pos = lp;
-            }
-            out_local_team = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_TEAM);
-            if (local_id <= 0) {
-                local_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_ID);
-            }
-        } else if (local_id <= 0) {
-            // Not in any active player state -> Lobby
-            out_players.clear();
+        if (out_local_pos.Length() < 0.1f && local_id > 0) {
             os_unfair_lock_lock(&s_PosCacheLock);
-            s_CachedEntityPositions.clear();
+            if (s_CachedEntityPositions.count(local_id)) {
+                out_local_pos = s_CachedEntityPositions[local_id].pos;
+            }
             os_unfair_lock_unlock(&s_PosCacheLock);
+        }
+
+        // Clean Lobby Detection:
+        // When in lobby/main menu, local player coordinates are (0,0,0) and active 3D camera is absent.
+        // In match (spawn island, plane, or combat), world coordinates are > 100m.
+        if (out_local_pos.Length() < 10.0f || !s_ActiveCamera) {
+            out_players.clear();
+            s_AimAssistActive = false;
             return false;
         }
 
-        if (out_local_pos.Length() < 0.1f && local_id > 0 && s_CachedEntityPositions.count(local_id)) {
-            out_local_pos = s_CachedEntityPositions[local_id].pos;
-        }
-
-        // Purge expired cached positions (older than 90 frames / ~3 seconds)
+        // Purge expired cached positions (older than 180 frames / ~6 seconds)
         os_unfair_lock_lock(&s_PosCacheLock);
         for (auto it = s_CachedEntityPositions.begin(); it != s_CachedEntityPositions.end(); ) {
-            if (s_FrameCount > it->second.tick && (s_FrameCount - it->second.tick) > 90) {
+            if (s_FrameCount > it->second.tick && (s_FrameCount - it->second.tick) > 180) {
                 it = s_CachedEntityPositions.erase(it);
             } else {
                 ++it;
@@ -714,21 +687,20 @@ public:
         }
         os_unfair_lock_unlock(&s_PosCacheLock);
 
-        // 4. Extract Avatars from ClientApp Table 2 (at client_app + 0xFA8)
-        // Table 2 (0xFA8) is m_avatars in NeoX: contains all players and bots in the match.
-        // In the Lobby, Table 2 is EMPTY. Table 1 (0xF80) has lobby UI objects (motorcycle, preview, etc.).
-        if (MemoryEngine::IsValidAddress(client_app)) {
-            uintptr_t avatars_head = MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_SECOND_NODE);
-            if (!MemoryEngine::IsValidAddress(avatars_head)) {
-                // Table 2 empty -> We are in the Lobby or loading screen
-                out_players.clear();
-                os_unfair_lock_lock(&s_PosCacheLock);
-                s_CachedEntityPositions.clear();
-                os_unfair_lock_unlock(&s_PosCacheLock);
-                s_AimAssistActive = false;
-                return false;
+        // Derive billboard right-vector directly from NeoX CameraBase view matrix (Row 0 at +0x40)
+        Vector3 cam_right(cosf(out_camera_yaw), 0.0f, -sinf(out_camera_yaw));
+        if (s_ActiveCamera && MemoryEngine::IsValidAddress(s_ActiveCamera)) {
+            Vector3 raw_r = MemoryEngine::Read<Vector3>(s_ActiveCamera + 0x40);
+            raw_r.y = 0.0f;
+            if (raw_r.Length() > 0.1f) {
+                cam_right = raw_r.Normalize();
             }
+        }
+        Vector3 sh_off = cam_right * 0.22f;
+        Vector3 hip_off = cam_right * 0.15f;
 
+        // 4. Extract Entities from ClientApp Hash Tables & Linked Lists
+        if (MemoryEngine::IsValidAddress(client_app)) {
             std::unordered_set<uintptr_t> visited_entities;
 
             auto process_entity_fn = [&](uintptr_t entity, int ent_id) {
@@ -760,10 +732,6 @@ public:
                 // In-world check (0x5D)
                 uint8_t in_world = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IN_WORLD);
                 if (in_world == 0) return;
-
-                // Space ID match check
-                int ent_space = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_SPACE_ID);
-                if (local_space_id > 0 && ent_space != local_space_id) return;
 
                 // Live 60 FPS coordinates directly from Entity coordinates (entity + 0x1C)
                 Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
@@ -837,10 +805,6 @@ public:
                     float h = (p.stance == 1) ? 1.35f : ((p.stance == 2) ? 0.65f : 1.80f);
                     p.head_pos = p.position + Vector3(0, h, 0);
 
-                    Vector3 right_vec(cosf(out_camera_yaw), 0.0f, -sinf(out_camera_yaw));
-                    Vector3 sh_off = right_vec * 0.22f;
-                    Vector3 hip_off = right_vec * 0.15f;
-
                     p.bones[BONE_HEAD]       = p.position + Vector3(0, h * 0.94f, 0);
                     p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.84f, 0);
                     p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.68f, 0);
@@ -862,30 +826,54 @@ public:
                 }
             };
 
-            uintptr_t node = avatars_head;
-            int safety = 0;
-            while (MemoryEngine::IsValidAddress(node) && ++safety < 500) {
-                int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
-                uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
-                process_entity_fn(entity, ent_id);
-                node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
+            // Scan Hash Buckets & Linked Lists across all tables:
+            // Table 1 (0xF70), Table 2 (0xF98), Table 3 (0xFC0)
+            uintptr_t table_bases[] = { 0xF70, 0xF98, 0xFC0 };
+            for (uintptr_t tb_off : table_bases) {
+                uintptr_t buckets = MemoryEngine::Read<uintptr_t>(client_app + tb_off);
+                size_t b_count    = MemoryEngine::Read<size_t>(client_app + tb_off + 0x08);
+                uintptr_t head    = MemoryEngine::Read<uintptr_t>(client_app + tb_off + 0x10);
+
+                // 1. Direct linked list traversal from head if valid
+                if (MemoryEngine::IsValidAddress(head)) {
+                    uintptr_t node = head;
+                    int safety = 0;
+                    while (MemoryEngine::IsValidAddress(node) && ++safety < 300) {
+                        int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
+                        uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
+                        process_entity_fn(entity, ent_id);
+                        node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
+                    }
+                }
+
+                // 2. Native bucket array traversal (covers any unlinked or bucket-only nodes)
+                if (MemoryEngine::IsValidAddress(buckets) && b_count > 0 && b_count <= 1024) {
+                    for (size_t b = 0; b < b_count; ++b) {
+                        uintptr_t b_ptr = MemoryEngine::Read<uintptr_t>(buckets + b * sizeof(uintptr_t));
+                        if (!MemoryEngine::IsValidAddress(b_ptr)) continue;
+                        uintptr_t node = MemoryEngine::Read<uintptr_t>(b_ptr);
+                        int safety = 0;
+                        while (MemoryEngine::IsValidAddress(node) && ++safety < 100) {
+                            int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
+                            uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
+                            process_entity_fn(entity, ent_id);
+                            node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
+                        }
+                    }
+                }
             }
         }
 
         // 5. Fallback: If hash table was momentarily empty, use fresh cached positions from onEntityMove
-        if (out_players.empty() && local_space_id > 0) {
+        if (out_players.empty()) {
             std::vector<std::pair<int, Vector3>> snapshot_positions;
             os_unfair_lock_lock(&s_PosCacheLock);
             for (const auto& kv : s_CachedEntityPositions) {
-                if (s_FrameCount >= kv.second.tick && (s_FrameCount - kv.second.tick) <= 90) {
+                if (s_FrameCount >= kv.second.tick && (s_FrameCount - kv.second.tick) <= 180) {
                     snapshot_positions.push_back({kv.first, kv.second.pos});
                 }
             }
             os_unfair_lock_unlock(&s_PosCacheLock);
-
-            Vector3 right_vec(cosf(out_camera_yaw), 0.0f, -sinf(out_camera_yaw));
-            Vector3 sh_off = right_vec * 0.22f;
-            Vector3 hip_off = right_vec * 0.15f;
 
             for (const auto& kv : snapshot_positions) {
                 if (kv.first == local_id) continue;
@@ -904,8 +892,7 @@ public:
                 p.stance = 0;
                 p.is_bot = false;
                 float h = 1.80f;
-                Vector3 head = p.position + Vector3(0, h, 0);
-                p.head_pos = head;
+                p.head_pos = p.position + Vector3(0, h, 0);
                 p.has_bones = true;
                 p.bones[BONE_HEAD]       = p.position + Vector3(0, h * 0.94f, 0);
                 p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.84f, 0);
@@ -973,19 +960,22 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& in_players, co
                 [log appendFormat:@"ClientApp VTable: 0x%lx\n", vtable];
                 
                 // Map 1 (0xF70)
+                uintptr_t map1_bptr = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xF70);
                 size_t map1_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xF78);
                 uintptr_t map1_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xF80);
-                [log appendFormat:@"Table 1 (0xF70): cnt=%zu, head=0x%lx\n", map1_cnt, map1_head];
+                [log appendFormat:@"Table 1 (0xF70): bptr=0x%lx, cnt=%zu, head=0x%lx\n", map1_bptr, map1_cnt, map1_head];
                 
                 // Map 2 (0xF98) - Avatars
+                uintptr_t map2_bptr = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xF98);
                 size_t map2_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xFA0);
                 uintptr_t map2_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xFA8);
-                [log appendFormat:@"Table 2 [Players] (0xF98): cnt=%zu, head=0x%lx\n", map2_cnt, map2_head];
+                [log appendFormat:@"Table 2 [Players] (0xF98): bptr=0x%lx, cnt=%zu, head=0x%lx\n", map2_bptr, map2_cnt, map2_head];
                 
                 // Map 3 (0xFC0) - Props/Vehicles
+                uintptr_t map3_bptr = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xFC0);
                 size_t map3_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xFC8);
                 uintptr_t map3_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xFD0);
-                [log appendFormat:@"Table 3 (0xFC0): cnt=%zu, head=0x%lx\n", map3_cnt, map3_head];
+                [log appendFormat:@"Table 3 (0xFC0): bptr=0x%lx, cnt=%zu, head=0x%lx\n", map3_bptr, map3_cnt, map3_head];
             }
 
             [log appendFormat:@"\n--- CAMERA & PROJECTION ---\n"];
@@ -1743,8 +1733,8 @@ static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
 
 - (CGPoint)ros_locationInView:(UIView *)view {
     CGPoint pt = [self ros_locationInView:view];
-    if (s_AimAssistActive && !g_Cheat.menu_open && s_ActiveAimTouch == self) {
-        float pull = (g_Cheat.aim_snap_mode == 2) ? 1.0f : ((g_Cheat.aim_snap_mode == 1) ? g_Cheat.aim_skill_ratio : 0.25f);
+    if (s_AimAssistActive && !g_Cheat.menu_open) {
+        float pull = (g_Cheat.aim_snap_mode == 2) ? 1.0f : ((g_Cheat.aim_snap_mode == 1) ? g_Cheat.aim_skill_ratio : 0.35f);
         pt.x += s_ActiveAimCorrection.x * pull;
         pt.y += s_ActiveAimCorrection.y * pull;
     }
