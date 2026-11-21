@@ -644,6 +644,7 @@ public:
         uintptr_t local_mgr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::LOCAL_PLAYER_MGR_PTR);
         uintptr_t local_player_entity = MemoryEngine::IsValidAddress(local_mgr) ? MemoryEngine::Read<uintptr_t>(local_mgr + 0x00) : 0;
         int local_id = s_CapturedLocalId;
+        int local_space_id = 0;
 
         if (MemoryEngine::IsValidAddress(local_player_entity)) {
             Vector3 lp = MemoryEngine::Read<Vector3>(local_player_entity + NeoXOffsets::ENTITY_COORDS);
@@ -653,6 +654,7 @@ public:
             out_local_team = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_TEAM);
             int read_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_ID);
             if (read_id > 0) local_id = read_id;
+            local_space_id = MemoryEngine::Read<int>(local_player_entity + NeoXOffsets::ENTITY_SPACE_ID);
         }
 
         if (local_id <= 0 && MemoryEngine::IsValidAddress(client_app)) {
@@ -668,12 +670,13 @@ public:
         }
 
         // Clean Lobby Detection:
-        // When in lobby/main menu, local player coordinates are (0,0,0) and active 3D camera is absent.
-        // In match (spawn island, plane, or combat), world coordinates are > 100m.
-        if (out_local_pos.Length() < 10.0f || !s_ActiveCamera) {
+        // In lobby / hall scene, local_space_id is 0 or negative and total world entities <= 8.
+        // In match (island, plane, combat), local_space_id > 0 or entity count > 8.
+        bool is_lobby = (local_space_id <= 0 && s_CachedEntityPositions.size() <= 8);
+        if (is_lobby) {
             out_players.clear();
             s_AimAssistActive = false;
-            return false;
+            return false; // Silence all ESP in main menu and lobby
         }
 
         // Purge expired cached positions (older than 180 frames / ~6 seconds)
@@ -761,43 +764,48 @@ public:
                     p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
                     p.distance = dist;
 
-                    // Resolve Player Name from Python object attributes if available
-                    char name_buf[64] = {0};
-                    static uintptr_t s_PyGetAttr = 0;
-                    if (!s_PyGetAttr) {
-                        s_PyGetAttr = MemoryEngine::GetBaseAddress() + 0x1c7b5f4;
-                    }
-                    typedef uintptr_t (*PyGetAttrFn)(uintptr_t, const char*);
-                    PyGetAttrFn py_get = (PyGetAttrFn)s_PyGetAttr;
-                    if (py_get) {
-                        const char* try_props[] = { "nickname", "role_name", "name" };
-                        for (const char* prop : try_props) {
-                            uintptr_t py_str = py_get(entity, prop);
-                            if (MemoryEngine::IsValidAddress(py_str)) {
-                                char temp[64] = {0};
-                                MemoryEngine::ReadBytes(py_str + 0x20, temp, sizeof(temp) - 1);
-                                if (temp[0] >= 32 && temp[0] <= 126) {
-                                    strncpy(name_buf, temp, sizeof(name_buf) - 1);
-                                    uintptr_t ref = MemoryEngine::Read<uintptr_t>(py_str);
-                                    if (ref > 0) MemoryEngine::Write<uintptr_t>(py_str, ref - 1);
-                                    break;
+                    // Resolve Player Name (cached by ent_id to maintain buttery 60 FPS without Python overhead)
+                    static std::unordered_map<int, std::pair<std::string, bool>> s_NameCache;
+                    if (s_FrameCount % 1800 == 0 && s_NameCache.size() > 400) s_NameCache.clear();
+
+                    auto it_name = s_NameCache.find(ent_id);
+                    if (it_name != s_NameCache.end()) {
+                        snprintf(p.name, sizeof(p.name), "%s", it_name->second.first.c_str());
+                        p.is_bot = it_name->second.second;
+                    } else {
+                        char name_buf[64] = {0};
+                        static uintptr_t s_PyGetAttr = 0;
+                        if (!s_PyGetAttr) {
+                            s_PyGetAttr = MemoryEngine::GetBaseAddress() + 0x1c7b5f4;
+                        }
+                        typedef uintptr_t (*PyGetAttrFn)(uintptr_t, const char*);
+                        PyGetAttrFn py_get = (PyGetAttrFn)s_PyGetAttr;
+                        if (py_get) {
+                            const char* try_props[] = { "nickname", "role_name", "name" };
+                            for (const char* prop : try_props) {
+                                uintptr_t py_str = py_get(entity, prop);
+                                if (MemoryEngine::IsValidAddress(py_str)) {
+                                    char temp[64] = {0};
+                                    MemoryEngine::ReadBytes(py_str + 0x20, temp, sizeof(temp) - 1);
+                                    if (temp[0] >= 32 && temp[0] <= 126) {
+                                        strncpy(name_buf, temp, sizeof(name_buf) - 1);
+                                        break;
+                                    }
                                 }
-                                uintptr_t ref = MemoryEngine::Read<uintptr_t>(py_str);
-                                if (ref > 0) MemoryEngine::Write<uintptr_t>(py_str, ref - 1);
                             }
                         }
-                    }
 
-                    if (name_buf[0] != '\0') {
-                        bool is_bot = (strstr(name_buf, "Bot") != nullptr ||
-                                       strstr(name_buf, "bot") != nullptr ||
-                                       strstr(name_buf, "Patrol") != nullptr);
-                        p.is_bot = is_bot;
-                        snprintf(p.name, sizeof(p.name), "%s", name_buf);
-                    } else {
-                        // In RoS-Cambo private server, default remote avatars are real players!
-                        p.is_bot = false;
-                        snprintf(p.name, sizeof(p.name), "Player #%d", ent_id % 10000);
+                        if (name_buf[0] != '\0') {
+                            bool is_bot = (strstr(name_buf, "Bot") != nullptr ||
+                                           strstr(name_buf, "bot") != nullptr ||
+                                           strstr(name_buf, "Patrol") != nullptr);
+                            p.is_bot = is_bot;
+                            snprintf(p.name, sizeof(p.name), "%s", name_buf);
+                        } else {
+                            p.is_bot = false;
+                            snprintf(p.name, sizeof(p.name), "Player #%d", ent_id % 10000);
+                        }
+                        s_NameCache[ent_id] = { p.name, p.is_bot };
                     }
 
                     // Build billboarded humanoid skeleton with ground-anchored feet
@@ -1493,7 +1501,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             }
 
             if (!crown_w2s && !feet_w2s) {
-                if (g_Cheat.esp_offscreen_360 && player.distance <= 250.0f) {
+                if (g_Cheat.esp_offscreen_360 && player.distance <= 120.0f) {
                     ImU32 off_col = player.is_bot ? IM_COL32(255, 180, 0, 220) : IM_COL32(255, 45, 45, 230);
                     RenderOffscreenRadarArrow(draw, player.position, local_pos, camera_yaw, center, screenSize, off_col);
                 }
@@ -1505,9 +1513,8 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
             float box_top = std::min(crown_screen.y, feet_screen.y);
             float box_bottom = std::max(crown_screen.y, feet_screen.y);
-            float box_h = box_bottom - box_top;
-            if (box_h < 12.0f) box_h = 12.0f;
-            float box_w = box_h * 0.48f;
+            float box_h = std::max(box_bottom - box_top, 8.0f);
+            float box_w = box_h * 0.44f;
             float box_center_x = (crown_screen.x + feet_screen.x) * 0.5f;
             float box_x = box_center_x - (box_w * 0.5f);
             float box_y = box_top;
@@ -1525,7 +1532,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 }
             }
 
-            if (g_Cheat.esp_snaplines) {
+            if (g_Cheat.esp_snaplines && player.distance <= 200.0f) {
                 ImVec2 snap_origin(center.x, screenSize.height);
                 if (g_Cheat.snapline_pos == 1) snap_origin = ImVec2(center.x, center.y);
                 if (g_Cheat.snapline_pos == 2) snap_origin = ImVec2(center.x, 0);
@@ -1676,7 +1683,11 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     // ECLIPSE IMGUI DESIGN DASHBOARD (White Modern Theme)
     // =========================================================================
     char hud_title[96];
-    std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%llu", (unsigned long long)g_TelemetryEntitiesLoaded);
+    if (g_TelemetryEntitiesLoaded == 0 && s_CachedEntityPositions.size() <= 8) {
+        std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | LOBBY | 60 fps");
+    } else {
+        std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%llu", (unsigned long long)g_TelemetryEntitiesLoaded);
+    }
     Menu::RenderHud(hud_title);
     Menu::Render(&g_Cheat.menu_open);
 
