@@ -337,6 +337,25 @@ static bool IsAimbotTriggerConditionMet(bool is_firing, bool is_scoped) {
 }
 
 // =============================================================================
+// DEBOUNCED MENU STATE CONTROLLER (Prevents Rapid Shuttering / Loop Toggling)
+// =============================================================================
+static double s_LastMenuToggleTime = 0.0;
+static void SetMenuOpen(bool open) {
+    double now = ImGui::GetTime();
+    if (now - s_LastMenuToggleTime < 0.35) {
+        return; // Debounce: ignore rapid toggling within 350ms
+    }
+    s_LastMenuToggleTime = now;
+    g_Cheat.menu_open = open;
+
+    // Reset touch down states immediately to prevent click bleed-through
+    ImGuiIO& io = ImGui::GetIO();
+    io.MouseDown[0] = false;
+    io.MouseClicked[0] = false;
+    io.MouseReleased[0] = false;
+}
+
+// =============================================================================
 // MAIN OVERLAY RENDER LOOP (Encoded into the Game's Command Buffer)
 // =============================================================================
 static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
@@ -500,7 +519,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.70f, 0.95f, 0.95f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
         if (ImGui::Button("ROSCAMBO", ImVec2(96, 36))) {
-            g_Cheat.menu_open = true;
+            SetMenuOpen(true);
         }
         ImGui::PopStyleColor(3);
 
@@ -516,13 +535,13 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
         ImGui::SetNextWindowSize(ImVec2(560, 370), ImGuiCond_FirstUseEver);
         ImGuiWindowFlags win_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
 
-        if (ImGui::Begin("##WizardDashboard", &g_Cheat.menu_open, win_flags)) {
+        if (ImGui::Begin("##WizardDashboard", nullptr, win_flags)) {
             // -----------------------------------------------------------------
             // LEFT SIDEBAR (Mascot + Navigation + Close Action)
             // -----------------------------------------------------------------
             ImGui::BeginChild("Sidebar", ImVec2(140, 0), true);
 
-            // Mascot Avatar & Header (Tapping this closes the menu)
+            // Mascot Avatar & Header Title
             ImVec2 badge_p = ImGui::GetCursorScreenPos();
             ImDrawList* sdraw = ImGui::GetWindowDrawList();
             sdraw->AddCircleFilled(ImVec2(badge_p.x + 60, badge_p.y + 25), 22.0f, IM_COL32(0, 160, 245, 200));
@@ -531,15 +550,9 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
             ImGui::Dummy(ImVec2(0, 50));
             
-            // Header button: Tap "RosCambo" to close
-            ImGui::SetCursorPosX(12);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.60f, 0.90f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.92f, 1.0f, 1.0f));
-            if (ImGui::Button("RosCambo [X]", ImVec2(115, 26))) {
-                g_Cheat.menu_open = false;
-            }
-            ImGui::PopStyleColor(3);
+            // Clean Sidebar Header
+            ImGui::SetCursorPosX(24);
+            ImGui::TextColored(ImVec4(0.85f, 0.92f, 1.0f, 1.0f), "RosCambo");
 
             ImGui::Spacing();
             ImGui::Separator();
@@ -572,7 +585,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.30f, 0.90f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("Close Menu", ImVec2(118, 30))) {
-                g_Cheat.menu_open = false;
+                SetMenuOpen(false);
             }
             ImGui::PopStyleColor(3);
 
@@ -596,7 +609,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.20f, 0.25f, 0.85f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.95f, 1.0f, 1.0f));
             if (ImGui::Button("X##TopClose", ImVec2(28, 26))) {
-                g_Cheat.menu_open = false;
+                SetMenuOpen(false);
             }
             ImGui::PopStyleColor(3);
 
@@ -734,6 +747,8 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 @interface UIWindow (RosTouchHook)
 @end
 
+static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
+
 @implementation UIWindow (RosTouchHook)
 + (void)load {
     static dispatch_once_t onceToken;
@@ -769,13 +784,26 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 g_TouchDelta = (CGPoint){ 0.0f, 0.0f };
             }
 
+            // Single touch tracking for Dear ImGui to prevent multi-finger fluttering
             if (s_ImGuiReady) {
                 ImGuiIO& io = ImGui::GetIO();
-                io.MousePos = ImVec2(loc.x, loc.y);
                 if (touch.phase == UITouchPhaseBegan) {
-                    io.MouseDown[0] = true;
+                    if (s_ActiveImGuiTouch == nil) {
+                        s_ActiveImGuiTouch = touch;
+                        io.MousePos = ImVec2(loc.x, loc.y);
+                        io.MouseDown[0] = true;
+                    }
+                } else if (touch.phase == UITouchPhaseMoved) {
+                    if (s_ActiveImGuiTouch == touch || s_ActiveImGuiTouch == nil) {
+                        s_ActiveImGuiTouch = touch;
+                        io.MousePos = ImVec2(loc.x, loc.y);
+                    }
                 } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
-                    io.MouseDown[0] = false;
+                    if (s_ActiveImGuiTouch == touch) {
+                        io.MousePos = ImVec2(loc.x, loc.y);
+                        io.MouseDown[0] = false;
+                        s_ActiveImGuiTouch = nil;
+                    }
                 }
             }
         }
