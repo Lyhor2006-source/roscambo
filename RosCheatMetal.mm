@@ -216,6 +216,41 @@ static void DrawSettingSlider(const char* label, float* v, float min, float max,
 }
 
 // =============================================================================
+// VTABLE HOOK FOR CLIENTAPP / ENTITYMANAGER
+// Verified VTable offset at base + 0x33D8DA8 (slot for getEntity)
+// =============================================================================
+typedef uintptr_t (*getEntity_t)(uintptr_t this_ptr, int id);
+static getEntity_t s_OrigGetEntity = nullptr;
+static uintptr_t s_CapturedEntityManager = 0;
+
+static uintptr_t Hooked_getEntity(uintptr_t this_ptr, int id) {
+    if (this_ptr > 0x100000000ULL) {
+        s_CapturedEntityManager = this_ptr;
+    }
+    if (s_OrigGetEntity) {
+        return s_OrigGetEntity(this_ptr, id);
+    }
+    return 0;
+}
+
+static void InstallVTableHook() {
+    uintptr_t base = MemoryEngine::GetBaseAddress();
+    if (!base) return;
+
+    uintptr_t slot = base + 0x33D8DA8;
+    uintptr_t current_fn = MemoryEngine::Read<uintptr_t>(slot);
+    if (current_fn != 0 && current_fn != (uintptr_t)&Hooked_getEntity) {
+        s_OrigGetEntity = (getEntity_t)current_fn;
+
+        vm_address_t page = slot & ~0x3FFFULL;
+        vm_protect(mach_task_self(), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+
+        *(uintptr_t*)slot = (uintptr_t)&Hooked_getEntity;
+        NSLog(@"[RosCamboMod] Installed VTable hook at 0x%lx -> %p", slot, &Hooked_getEntity);
+    }
+}
+
+// =============================================================================
 // DYNAMIC GAME STATE AND MATRIX SCANNER
 // =============================================================================
 class RosGameScanner {
@@ -234,8 +269,24 @@ public:
         uintptr_t base = MemoryEngine::GetBaseAddress();
         if (!base) return false;
 
-        uintptr_t client_app = MemoryEngine::Read<uintptr_t>(base + 0x3B20000);
+        InstallVTableHook();
+
+        uintptr_t client_app = s_CapturedEntityManager;
         if (!MemoryEngine::IsValidAddress(client_app)) {
+            // Check engine singleton at base + 0x339D238 for camera
+            uintptr_t eng_global = MemoryEngine::Read<uintptr_t>(base + 0x339D238);
+            if (MemoryEngine::IsValidAddress(eng_global)) {
+                uintptr_t p1 = MemoryEngine::Read<uintptr_t>(eng_global);
+                if (MemoryEngine::IsValidAddress(p1)) {
+                    uintptr_t cam = MemoryEngine::Read<uintptr_t>(p1 + 0x3E8);
+                    if (MemoryEngine::IsValidAddress(cam)) {
+                        out_vp = MemoryEngine::Read<Matrix4x4>(cam + 0x180);
+                        out_camera_yaw = MemoryEngine::Read<float>(cam + 0x210);
+                        float fov = MemoryEngine::Read<float>(cam + 0x218);
+                        if (fov > 0.0f && fov < 55.0f) out_is_scoped = true;
+                    }
+                }
+            }
             return false;
         }
 
@@ -247,6 +298,20 @@ public:
             if (fov > 0.0f && fov < 55.0f) {
                 out_is_scoped = true;
             }
+        } else {
+            uintptr_t eng_global = MemoryEngine::Read<uintptr_t>(base + 0x339D238);
+            if (MemoryEngine::IsValidAddress(eng_global)) {
+                uintptr_t p1 = MemoryEngine::Read<uintptr_t>(eng_global);
+                if (MemoryEngine::IsValidAddress(p1)) {
+                    uintptr_t cam = MemoryEngine::Read<uintptr_t>(p1 + 0x3E8);
+                    if (MemoryEngine::IsValidAddress(cam)) {
+                        out_vp = MemoryEngine::Read<Matrix4x4>(cam + 0x180);
+                        out_camera_yaw = MemoryEngine::Read<float>(cam + 0x210);
+                        float fov = MemoryEngine::Read<float>(cam + 0x218);
+                        if (fov > 0.0f && fov < 55.0f) out_is_scoped = true;
+                    }
+                }
+            }
         }
 
         uintptr_t local_player = MemoryEngine::Read<uintptr_t>(client_app + 0xF98);
@@ -257,7 +322,7 @@ public:
 
         uintptr_t entity_buckets = MemoryEngine::Read<uintptr_t>(client_app + 0xF70);
         size_t bucket_count = MemoryEngine::Read<size_t>(client_app + 0xF78);
-            if (MemoryEngine::IsValidAddress(entity_buckets) && bucket_count > 0 && bucket_count <= 4096) {
+        if (MemoryEngine::IsValidAddress(entity_buckets) && bucket_count > 0 && bucket_count <= 4096) {
                 for (size_t i = 0; i < bucket_count; ++i) {
                     uintptr_t node = MemoryEngine::Read<uintptr_t>(entity_buckets + (i * sizeof(uintptr_t)));
                     while (MemoryEngine::IsValidAddress(node)) {
@@ -494,17 +559,6 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     float closest_aim_dist = g_Cheat.aim_360 ? 99999.0f : g_Cheat.aim_fov;
     const RosPlayer* aim_target = nullptr;
     Vector2 aim_target_screen{};
-
-    // Always Render Status Watermark on Top Bar
-    {
-        char hud_buf[128];
-        snprintf(hud_buf, sizeof(hud_buf), "RosCambo v6.0 | ESP: %s | Aim: %s",
-                 g_Cheat.esp_enabled ? "ON" : "OFF",
-                 g_Cheat.aimbot_enabled ? (g_Cheat.aim_snap_mode == 1 ? "50% Skill" : "Rage") : "OFF");
-        draw->AddRectFilled(ImVec2(10, 10), ImVec2(275, 32), IM_COL32(10, 14, 20, 200), 6.0f);
-        draw->AddRect(ImVec2(10, 10), ImVec2(275, 32), IM_COL32(0, 200, 255, 180), 6.0f, 0, 1.2f);
-        draw->AddText(ImVec2(18, 14), IM_COL32(0, 240, 255, 255), hud_buf);
-    }
 
     // Precision Crosshair
     if (g_Cheat.esp_crosshair) {
@@ -1172,5 +1226,6 @@ static void InstallMetalPresentHooks() {
 
 __attribute__((constructor)) static void Entry() {
     InstallMetalPresentHooks();
-    NSLog(@"[RosCamboMod] Loaded with Metal CommandBuffer Present Hook, Circular Draggable Avatar & Gesture Support.");
+    InstallVTableHook();
+    NSLog(@"[RosCamboMod] Loaded with Metal Present Hook, VTable Entity Interceptor, Circular Avatar & Gesture Support.");
 }
