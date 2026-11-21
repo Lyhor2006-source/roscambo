@@ -226,6 +226,13 @@ public:
         return fallback;
     }
 
+    static inline bool ReadBytes(uintptr_t addr, void* dest, size_t size) {
+        if (addr < 0x100000000ULL || addr > 0x3000000000ULL || !dest || size == 0) return false;
+        vm_size_t bytes_read = 0;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, size, (vm_address_t)dest, &bytes_read);
+        return (kr == KERN_SUCCESS && bytes_read == size);
+    }
+
     template <typename T>
     static inline bool Write(uintptr_t addr, T value) {
         if (addr < 0x100000000ULL || addr > 0x3000000000ULL) return false;
