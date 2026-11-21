@@ -1428,11 +1428,9 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     bool is_scoped = false;
     std::vector<RosPlayer> players;
 
-    // Always attempt active camera and VP matrix extraction for fallback & 3D skeleton rendering
-    ProjectionEngine::FindActiveCamera(&s_ActiveCamera);
-    if (s_ActiveCamera != 0) {
-        ProjectionEngine::ExtractViewProjection(vp_matrix, s_ActiveCamera);
-    }
+    // Resolve native scanner state for active camera, view projection, local team and orientation
+    std::vector<RosPlayer> scanner_players;
+    RosGameScanner::FetchState(scanner_players, local_pos, local_team, vp_matrix, camera_yaw, is_firing, is_scoped);
 
     auto NormalizeScreenPt = [&](Vector2 pt) -> Vector2 {
         if (screenSize.width <= 0 || screenSize.height <= 0) return pt;
@@ -1487,7 +1485,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             players.push_back(p);
         }
     } else {
-        RosGameScanner::FetchState(players, local_pos, local_team, vp_matrix, camera_yaw, is_firing, is_scoped);
+        players = std::move(scanner_players);
     }
 
     g_TelemetryEntitiesLoaded = players.size();
@@ -1541,7 +1539,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                     continue;
                 }
             }
-            if (g_Cheat.esp_hide_bots && player.is_bot) continue;
+            if (cfg.espHideBots && player.is_bot) continue;
 
             Vector2 crown_screen, feet_screen;
             bool crown_w2s = false;
