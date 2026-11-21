@@ -59,32 +59,42 @@ struct Matrix4x4 {
 // Function EntityManager::getEntity (VA 0x100878b88)
 // -----------------------------------------------------------------------------
 namespace NeoXOffsets {
-    // Engine Camera Singletons & Matrix:
-    constexpr uintptr_t CAMERA_GLOBAL_PTR          = 0x44ca8f0; // cocos2d::Camera::_visitingCamera
-    constexpr uintptr_t CAMERA_VIEW_PROJ           = 0x2e8;     // Mat4 _viewProjection (64 bytes)
+    // Engine Singletons:
+    constexpr uintptr_t DIRECTOR_GLOBAL_PTR       = 0x3A66CD8; // cocos2d::Director::getInstance() (0x100ed1e20)
+    constexpr uintptr_t LOCAL_PLAYER_MGR_PTR       = 0x39AB428; // Local Player Manager singleton (0x10089a794)
+    constexpr uintptr_t CLIENTAPP_GLOBAL_PTR       = 0x44C46B8; // Global ClientApp pointer
+
+    // cocos2d::Director & Scene:
+    constexpr uintptr_t DIRECTOR_RUNNING_SCENE     = 0x148;     // Director::_runningScene
+    constexpr uintptr_t SCENE_CAMERAS_BEGIN        = 0x220;     // Scene::_cameras begin
+    constexpr uintptr_t SCENE_CAMERAS_END          = 0x228;     // Scene::_cameras end
+
+    // cocos2d::Camera:
+    constexpr uintptr_t CAMERA_VIEW_PROJ           = 0x2E8;     // Mat4 _viewProjection (64 bytes)
     constexpr uintptr_t CAMERA_VIEW                = 0x228;     // Mat4 _view
     constexpr uintptr_t CAMERA_PROJ                = 0x268;     // Mat4 _projection
+    constexpr uintptr_t CAMERA_FLAG                = 0x352;     // uint16_t _cameraFlag (1=Default/2D, 2=User1/3D)
 
     // Inside ClientApp:
-    constexpr uintptr_t CLIENTAPP_LOCAL_PLAYER_ID  = 0xf68; // str w1, [x0, #0xf68]
-    constexpr uintptr_t CLIENTAPP_ENTITY_BUCKETS    = 0xf70; // ldr x11, [x0, #0xf70] (std::unordered_map)
-    constexpr uintptr_t CLIENTAPP_BUCKET_COUNT     = 0xf78; // ldr x9,  [x0, #0xf78]
-    constexpr uintptr_t CLIENTAPP_LOCAL_PLAYER_PTR = 0xf98; // str x20, [x0, #0xf98] (Local Player Pointer)
+    constexpr uintptr_t CLIENTAPP_LOCAL_PLAYER_ID  = 0xF68;     // str w1, [x0, #0xf68]
+    constexpr uintptr_t CLIENTAPP_ENTITY_BUCKETS    = 0xF70;     // ldr x11, [x0, #0xf70] (std::unordered_map)
+    constexpr uintptr_t CLIENTAPP_BUCKET_COUNT     = 0xF78;     // ldr x9,  [x0, #0xf78]
 
     // Inside std::unordered_map Node (LLVM libc++ hash node):
-    constexpr uintptr_t HASH_NODE_NEXT             = 0x00;  // ldr x11, [x11]
-    constexpr uintptr_t HASH_NODE_KEY              = 0x10;  // ldr w12, [x11, #0x10] (Entity ID)
-    constexpr uintptr_t HASH_NODE_VALUE            = 0x18;  // ldr x0,  [x11, #0x18] (Entity* Pointer)
+    constexpr uintptr_t HASH_NODE_NEXT             = 0x00;      // ldr x11, [x11]
+    constexpr uintptr_t HASH_NODE_KEY              = 0x10;      // ldr w12, [x11, #0x10] (Entity ID)
+    constexpr uintptr_t HASH_NODE_VALUE            = 0x18;      // ldr x0,  [x11, #0x18] (Entity* Pointer)
 
-    // Entity Object offsets:
-    constexpr uintptr_t ENTITY_COORDS              = 0x90;  // Vector3 world position
-    constexpr uintptr_t ENTITY_HP                  = 0x1B8; // int32 health
-    constexpr uintptr_t ENTITY_MAX_HP              = 0x1BC; // int32 max health
-    constexpr uintptr_t ENTITY_TEAM                = 0x1C4; // int32 team
-    constexpr uintptr_t ENTITY_STANCE              = 0x1C8; // int32 stance (0=stand, 1=crouch, 2=prone)
-    constexpr uintptr_t ENTITY_IS_BOT              = 0x1D0; // bool is_bot
-    constexpr uintptr_t ENTITY_SKELETAL_MODEL      = 0x228; // ModelSkeletal pointer
-    constexpr uintptr_t SKELETAL_BONE_ARRAY        = 0x48;  // Bone transform array
+    // Entity Object offsets (VERIFIED ARM64):
+    constexpr uintptr_t ENTITY_ID                  = 0x18;      // int32 entity_id
+    constexpr uintptr_t ENTITY_COORDS              = 0x1C;      // Vector3 world position (x@0x1c, y@0x20, z@0x24)
+    constexpr uintptr_t ENTITY_HP                  = 0x1B8;     // int32 health
+    constexpr uintptr_t ENTITY_MAX_HP              = 0x1BC;     // int32 max health
+    constexpr uintptr_t ENTITY_TEAM                = 0x1C4;     // int32 team
+    constexpr uintptr_t ENTITY_STANCE              = 0x1C8;     // int32 stance (0=stand, 1=crouch, 2=prone)
+    constexpr uintptr_t ENTITY_IS_BOT              = 0x1D0;     // bool is_bot
+    constexpr uintptr_t ENTITY_PLAYER_MODEL        = 0x228;     // Player model pointer (non-null for players)
+    constexpr uintptr_t SKELETAL_BONE_ARRAY        = 0x48;      // Bone transform array
 }
 
 enum BoneId : int {
