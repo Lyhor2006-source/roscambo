@@ -815,16 +815,45 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const
             NSString* docDir = [paths firstObject];
             NSString* filePath = [docDir stringByAppendingPathComponent:@"debug.txt"];
             NSError* err = nil;
-            [log writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:&err];
+            [log writeToFile:filePath atomically:NO encoding:NSUTF8StringEncoding error:&err];
             if (err) {
                 NSLog(@"[RosCambo-DEBUG] Failed to write debug.txt: %@", err);
             }
         }
 
-        // 2. Stream compact summary to USB syslog (NSLog)
+        // 2. Copy to iOS System Clipboard (can paste anywhere)
+        [UIPasteboard generalPasteboard].string = log;
+
+        // 3. Stream compact summary to USB syslog (NSLog)
         NSLog(@"[RosCambo-DEBUG] F:%llu | App:0x%lx | Cam:0x%lx | VP_Valid:%d | LP:(%.1f,%.1f,%.1f) | Ents:%zu | MoveHits:%llu",
               s_FrameCount, s_CapturedEntityManager, s_ActiveCamera, vp_valid ? 1 : 0,
               local_pos.x, local_pos.y, local_pos.z, players.size(), s_MoveHookHits);
+
+        // 4. Auto-Push to PC Debug Server over Wi-Fi
+        Menu::Config& cfg = Menu::Cfg();
+        if (cfg.autoSendToPc && cfg.serverIp[0] != '\0') {
+            NSString* hostStr = [NSString stringWithUTF8String:cfg.serverIp];
+            NSString* urlStr = [NSString stringWithFormat:@"http://%@/debug", hostStr];
+            NSURL* targetUrl = [NSURL URLWithString:urlStr];
+            if (targetUrl) {
+                NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:targetUrl
+                                                                   cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                               timeoutInterval:2.0];
+                [req setHTTPMethod:@"POST"];
+                [req setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+                [req setHTTPBody:[log dataUsingEncoding:NSUTF8StringEncoding]];
+
+                NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+                    completionHandler:^(NSData* _Nullable d, NSURLResponse* _Nullable r, NSError* _Nullable err) {
+                        if (!err) {
+                            NSLog(@"[RosCambo-DEBUG] Successfully pushed report to PC (%@)", hostStr);
+                        } else {
+                            NSLog(@"[RosCambo-DEBUG] Push to PC error: %@", err.localizedDescription);
+                        }
+                    }];
+                [task resume];
+            }
+        }
     }
 }
 

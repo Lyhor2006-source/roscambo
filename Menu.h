@@ -62,6 +62,8 @@ namespace Menu
         float accent[3]         = { 0.20f, 0.45f, 1.00f };
         bool  ghillieSpaceData  = false;
         bool  debugScanToFile   = true;
+        bool  autoSendToPc      = true;
+        char  serverIp[64]      = "192.168.7.103:8888";
     };
 
     Config& Cfg();

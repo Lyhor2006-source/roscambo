@@ -417,14 +417,18 @@ namespace Menu
         ImGui::Text("Cached Positions: %llu", g_TelemetryCachedPositions);
         ImGui::Text("Entities Loaded: %llu", g_TelemetryEntitiesLoaded);
 
-        Section("DEBUG SCANNER (USB / DEBUG.TXT)");
-        Toggle("Live Log to debug.txt (USB)", &cfg.debugScanToFile);
-        if (ImGui::Button("Dump Gameplay Now", ImVec2(-RightPad(), 0)))
+        Section("DEBUG SCANNER & PC AUTO-SYNC");
+        Toggle("Live Log to debug.txt (Local)", &cfg.debugScanToFile);
+        Toggle("Auto-Send to PC Server (Wi-Fi)", &cfg.autoSendToPc);
+        ImGui::TextUnformatted("PC Server Host:Port");
+        ImGui::SetNextItemWidth(-RightPad());
+        ImGui::InputText("##serverip", cfg.serverIp, sizeof(cfg.serverIp));
+        ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Target: http://%s/debug", cfg.serverIp);
+        if (ImGui::Button("Dump & Push to PC Now", ImVec2(-RightPad(), 0)))
         {
             g_TriggerDebugDump = true;
         }
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Output: Documents/debug.txt");
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Visible in 3uTools/iTunes File Sharing");
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Outputs to D:\\RosCambo\\debug.txt on PC");
 
         Section("CONFIG");
         if (ImGui::Button("Reset to Defaults", ImVec2(-RightPad(), 0)))
