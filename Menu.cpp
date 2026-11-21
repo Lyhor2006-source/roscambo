@@ -328,6 +328,7 @@ namespace Menu
                     ImGui::TextColored(ImVec4(0.0f, 0.85f, 1.0f, 1.0f), "OVERLAY & SYSTEM SETTINGS");
                     ImGui::Separator();
 
+                    ToggleSwitch("Anti-Record / StreamProof", &cfg.antiRecord);
                     ToggleSwitch("Show Dynamic Island HUD", &cfg.showDynamicIsland);
                     ImGui::SliderFloat("Menu Scale", &cfg.menuScale, 0.8f, 1.4f, "%.2fx");
 

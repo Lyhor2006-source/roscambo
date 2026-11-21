@@ -676,8 +676,8 @@ public:
                 cam_right = raw_r.Normalize();
             }
         }
-        Vector3 sh_off = cam_right * 0.22f;
-        Vector3 hip_off = cam_right * 0.15f;
+        Vector3 sh_off = cam_right * 2.2f;
+        Vector3 hip_off = cam_right * 1.5f;
 
         // 4. Extract Entities from ClientApp Hash Tables & Linked Lists
         if (MemoryEngine::IsValidAddress(client_app)) {
@@ -757,9 +757,9 @@ public:
                         s_NameCache[ent_id] = { p.name, p.is_bot };
                     }
 
-                    // Build billboarded humanoid skeleton with ground-anchored feet
+                    // Build billboarded humanoid skeleton with ground-anchored feet (NeoX decimeter units)
                     p.has_bones = true;
-                    float h = (p.stance == 1) ? 1.35f : ((p.stance == 2) ? 0.65f : 1.80f);
+                    float h = (p.stance == 1) ? 13.5f : ((p.stance == 2) ? 6.5f : 17.5f);
                     p.head_pos = p.position + Vector3(0, h, 0);
 
                     p.bones[BONE_HEAD]       = p.position + Vector3(0, h * 0.94f, 0);
@@ -767,17 +767,17 @@ public:
                     p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.68f, 0);
                     p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.45f, 0);
                     p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] - sh_off;
-                    p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] - (sh_off * 0.4f) + Vector3(0, -0.22f, 0);
-                    p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
+                    p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] - (sh_off * 0.4f) + Vector3(0, -2.2f, 0);
+                    p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -2.0f, 0);
                     p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + sh_off;
-                    p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + (sh_off * 0.4f) + Vector3(0, -0.22f, 0);
-                    p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
+                    p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + (sh_off * 0.4f) + Vector3(0, -2.2f, 0);
+                    p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -2.0f, 0);
                     p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] - hip_off;
-                    p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
-                    p.bones[BONE_L_FOOT]     = p.position - hip_off + Vector3(0, 0.05f, 0);
+                    p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -2.2f, 0);
+                    p.bones[BONE_L_FOOT]     = p.position - hip_off + Vector3(0, 0.5f, 0);
                     p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + hip_off;
-                    p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
-                    p.bones[BONE_R_FOOT]     = p.position + hip_off + Vector3(0, 0.05f, 0);
+                    p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -2.2f, 0);
+                    p.bones[BONE_R_FOOT]     = p.position + hip_off + Vector3(0, 0.5f, 0);
 
                     out_players.push_back(p);
                 }
@@ -1365,6 +1365,15 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
     // Sync Cheat Configurations with ECLIPSE Menu
     Menu::Config& cfg = Menu::Cfg();
+
+    // Stream-Proof Anti-Screen Recording & QuickTime / AirPlay Protection
+    if (cfg.antiRecord) {
+        if (@available(iOS 11.0, *)) {
+            if ([UIScreen mainScreen].isCaptured) {
+                return;
+            }
+        }
+    }
     g_Cheat.esp_enabled = cfg.espEnabled;
     g_Cheat.esp_box = cfg.espBox;
     g_Cheat.esp_box_type = cfg.espBoxStyle;
@@ -1559,7 +1568,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             }
 
             if (!crown_w2s || !feet_w2s) {
-                float h_crown = (player.stance == 1 ? 1.40f : (player.stance == 2 ? 0.70f : 1.85f));
+                float h_crown = (player.stance == 1 ? 13.5f : (player.stance == 2 ? 6.5f : 17.5f));
                 Vector3 crown_3d = player.position + Vector3(0, h_crown, 0);
                 Vector3 feet_3d = player.position;
 

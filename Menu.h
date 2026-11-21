@@ -45,6 +45,7 @@ namespace Menu
         float lineThickness     = 1.2f;
         float skeletonThickness = 1.2f;
         bool  teamCheck         = false;
+        bool  antiRecord        = false;
 
         // Custom Colors
         float colEnemy[4]       = { 1.00f, 0.22f, 0.32f, 1.00f }; // Neon Crimson

@@ -1459,8 +1459,7 @@ def _pb_esp(g):
     me6 = [0.0] * 9
     try:
         me = BigWorld.player()
-        tn0 = type(me).__name__ if me is not None else 'None'
-        if me is None or 'BattleGround' not in tn0:
+        if me is None:
             raise _PBNotBattle('not battle')
         delay = 0.020
         ents = BigWorld.entities
@@ -1495,8 +1494,10 @@ def _pb_esp(g):
             cam = me.getViewPos() if hasattr(me, 'getViewPos') else mp
         for k in list(ents.keys()):
             e = ents[k]
+            if e is me or not hasattr(e, 'position'):
+                continue
             tn = type(e).__name__
-            if 'BattleGround' not in tn or e is me:
+            if any(skip in tn for skip in ('Space', 'Scene', 'Effect', 'Trigger', 'Bullet', 'DropItem')):
                 continue
             try:
                 eid = int(getattr(e, 'id', k) or k)
@@ -1540,7 +1541,16 @@ def _pb_esp(g):
                 except Exception:
                     kn = 0
                 bot = 0
-                nick = getattr(e, 'nickname', '') or getattr(e, 'playerName', '') or ''
+                nick = ''
+                for nf in ('nickname', 'playerName', 'role_name', 'char_name', 'charName', 'userName', 'name'):
+                    try:
+                        val = getattr(e, nf, None)
+                        if callable(val): val = val()
+                        if val and isinstance(val, (str, unicode)) and len(str(val).strip()) > 0:
+                            nick = str(val).strip()
+                            break
+                    except Exception:
+                        pass
                 if '[BOT]' in nick or 'bot' in nick.lower():
                     bot = 1
                 else:
