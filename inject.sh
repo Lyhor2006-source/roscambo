@@ -39,6 +39,11 @@ echo "[*] Main Executable: $EXECUTABLE_PATH"
 echo "[*] Copying $DYLIB_NAME into application bundle..."
 cp "$DYLIB_NAME" "$APP_DIR/"
 
+if [ -d "asset" ]; then
+    echo "[*] Copying asset directory into application bundle..."
+    cp -r asset "$APP_DIR/"
+fi
+
 echo "[*] Injecting LC_LOAD_DYLIB load command..."
 if which optool > /dev/null 2>&1; then
     optool install -c load -p "@executable_path/$DYLIB_NAME" -t "$EXECUTABLE_PATH"

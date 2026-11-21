@@ -73,4 +73,8 @@ Script នេះនឹង៖
 
 ### ៤. ការដំឡើងលេងលើទូរស័ព្ទ iPhone / iPad
 * យក file `RoS-Cambo-Modded.ipa` ទៅដំឡើងតាមរយៈ **TrollStore** (ល្អបំផុត មិនបាច់ Sign ៧ ថ្ងៃ) ឬប្រើ **Sideloadly / AltStore / Esign** ជាមួយ Apple ID របស់អ្នក។
-* នៅពេលបើកហ្គេម នឹងមានប៊ូតុងអណ្តែត `ROSCAMBO` នៅជ្រុងខាងលើអេក្រង់។ ចុចលើវាដើម្បីបើក/បិទ Menu ImGui!
+* **របៀបបញ្ជា Mod Menu ថ្មី (New Circular Avatar & Touch System):**
+  1. **ប៊ូតុងមូលអណ្តែត (Movable Circular Avatar):** ប៊ូតុងរាងការ៉ូចាស់ត្រូវបានប្តូរទៅជារង្វង់មូល ដែលផ្ទុកនូវរូប Avatar (`asset/avartar.jpg`) ជាមួយពន្លឺ Neon Ring ដ៏ស្រស់ស្អាត។ អ្នកអាចចុចអូសវា (Drag & Move) ទៅកាន់គ្រប់ទីតាំងលើអេក្រង់តាមចិត្ត និងចុចលើវាដើម្បីបើក/បិទ Menu។
+  2. **កាយវិការ ៣ ម្រាមដៃ (3-Finger Tap Gesture):** អ្នកអាចយកម្រាមដៃ ៣ ចុចលើអេក្រង់ព្រមគ្នា ដើម្បីបើក ឬបិទ Mod Menu បានភ្លាមៗគ្រប់ពេលវេលា (Natively hooked មិនប៉ះពាល់ដល់ Touch របស់ហ្គេមឡើយ)។
+  3. **Touch Safe (មិនលេប Event របស់ហ្គេម):** Touch Event សម្រាប់ការរត់ (Joystick) ការបាញ់ និងការបង្វិលកាមេរ៉ា ដំណើរការបាន 100% ឥតគាំង។
+  4. **Dynamic Radar & Crosshair:** បង្ហាញ Mini-Radar លើជ្រុងស្តាំ និង Crosshair កណ្តាលអេក្រង់ រួមទាំងប្រព័ន្ធ Aimbot FOV Circle យ៉ាងច្បាស់។
