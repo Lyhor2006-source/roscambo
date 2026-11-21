@@ -678,8 +678,11 @@ static void Apply5050SkillBlendAimbot(const Vector2& target_screen, const Vector
     }
 
     if (fabsf(final_correction.x) > 0.05f || fabsf(final_correction.y) > 0.05f) {
-        uintptr_t base = MemoryEngine::GetBaseAddress();
-        uintptr_t client_app = MemoryEngine::Read<uintptr_t>(base + 0x3B20000);
+        uintptr_t client_app = s_CapturedEntityManager;
+        if (!MemoryEngine::IsValidAddress(client_app)) {
+            uintptr_t base = MemoryEngine::GetBaseAddress();
+            client_app = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CLIENTAPP_GLOBAL_PTR);
+        }
         uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
         if (MemoryEngine::IsValidAddress(camera_obj)) {
             float cur_pitch = MemoryEngine::Read<float>(camera_obj + 0x20C);
