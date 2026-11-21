@@ -38,18 +38,12 @@ jobs:
             -isysroot ~/sdks/iPhoneOS14.5.sdk \
             -stdlib=libc++ \
             -O3 -std=c++17 -fno-objc-arc \
-            -I. -I./imgui -I./imgui/backends \
+            -I. \
             -shared -fPIC -fuse-ld=lld \
-            -framework UIKit -framework Metal -framework CoreGraphics \
+            -framework UIKit -framework Metal -framework MetalKit -framework CoreGraphics \
             -framework QuartzCore -framework Foundation \
             -o roscheat.dylib \
-            RosCheatMetal.mm \
-            Menu.cpp \
-            imgui/imgui.cpp \
-            imgui/imgui_draw.cpp \
-            imgui/imgui_tables.cpp \
-            imgui/imgui_widgets.cpp \
-            imgui/backends/imgui_impl_metal.mm
+            RyomenWrapper.mm
 
           strip -x roscheat.dylib || true
           ldid -S roscheat.dylib || true
