@@ -501,12 +501,12 @@ public:
         }
 
         // 2. Resolve ClientApp:
-        // Priority 1: Verified static pointer at base + 0x37809F0
+        // Priority 1: Verified static pointer at base + 0x37819F0 (0x100883c48: ldr x0, [base + 0x37819F0])
         if (!MemoryEngine::IsValidAddress(s_CapturedEntityManager)) {
             uintptr_t global_app = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CLIENTAPP_GLOBAL_PTR);
             if (MemoryEngine::IsValidAddress(global_app)) {
                 uintptr_t v1 = MemoryEngine::Read<uintptr_t>(global_app);
-                if (v1 == base + 0x33D8D98) {
+                if (v1 >= base && v1 < base + 0x5000000) {
                     s_CapturedEntityManager = global_app;
                 }
             }
@@ -563,81 +563,120 @@ public:
             out_local_pos = s_CachedEntityPositions[local_id].pos;
         }
 
-        // 4. Extract Entities from ClientApp linked lists (heads at 0xF80 and 0xFD0)
+        // 4. Extract Entities from ClientApp (All 3 Hash Tables: 0xF80, 0xFA8, 0xFD0 & Buckets)
         if (MemoryEngine::IsValidAddress(client_app)) {
             uintptr_t heads[] = {
                 MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_FIRST_NODE),
-                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_SECOND_NODE)
+                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_SECOND_NODE),
+                MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_THIRD_NODE)
+            };
+            uintptr_t bucket_ptrs[] = {
+                client_app + 0xF70,
+                client_app + 0xF98,
+                client_app + 0xFC0
             };
             std::unordered_set<uintptr_t> visited_entities;
 
+            auto process_entity_fn = [&](uintptr_t entity, int ent_id) {
+                if (!MemoryEngine::IsValidAddress(entity) || visited_entities.count(entity)) return;
+                visited_entities.insert(entity);
+
+                int read_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_ID);
+                if (read_id > 0) ent_id = read_id;
+
+                uint8_t self_ctrl = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_SELF_CONTROLLED);
+                if (self_ctrl != 0 || entity == local_player_entity || (local_id > 0 && ent_id == local_id)) {
+                    Vector3 lp = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
+                    if (lp.Length() > 0.1f && std::abs(lp.x) < 20000.0f) {
+                        out_local_pos = lp;
+                    }
+                    local_player_entity = entity;
+                    local_id = ent_id;
+                    return;
+                }
+
+                Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
+                if (s_CachedEntityPositions.count(ent_id)) {
+                    pos = s_CachedEntityPositions[ent_id].pos;
+                }
+
+                if (pos.Length() > 1.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
+                    RosPlayer p{};
+                    p.instance = entity;
+                    p.id = ent_id;
+                    p.position = pos;
+                    p.health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
+                    p.max_health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
+                    p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
+                    p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
+                    p.is_bot = ((uint32_t)ent_id <= 0x40000000);
+
+                    if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
+                    if (p.health <= 0 || p.health > p.max_health) p.health = 100;
+
+                    float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
+                    p.distance = dist;
+
+                    if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
+                        snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
+
+                        // Build procedural humanoid skeleton based on position & stance
+                        p.has_bones = true;
+                        float h = (p.stance == 1) ? 1.30f : ((p.stance == 2) ? 0.60f : 1.75f);
+                        Vector3 head = p.position + Vector3(0, h, 0);
+                        p.head_pos = head;
+                        p.bones[BONE_HEAD]       = head;
+                        p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.88f, 0);
+                        p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.72f, 0);
+                        p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.48f, 0);
+                        p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] + Vector3(-0.25f, -0.05f, 0);
+                        p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] + Vector3(-0.15f, -0.22f, 0);
+                        p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
+                        p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + Vector3(0.25f, -0.05f, 0);
+                        p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + Vector3(0.15f, -0.22f, 0);
+                        p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
+                        p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] + Vector3(-0.16f, -0.06f, 0);
+                        p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
+                        p.bones[BONE_L_FOOT]     = p.bones[BONE_L_KNEE] + Vector3(0, -0.20f, 0);
+                        p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + Vector3(0.16f, -0.06f, 0);
+                        p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
+                        p.bones[BONE_R_FOOT]     = p.bones[BONE_R_KNEE] + Vector3(0, -0.20f, 0);
+
+                        out_players.push_back(p);
+                    }
+                }
+            };
+
+            // 1. Traverse linked list heads
             for (uintptr_t head : heads) {
                 uintptr_t node = head;
                 int safety = 0;
                 while (MemoryEngine::IsValidAddress(node) && ++safety < 1500) {
                     int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
                     uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
+                    process_entity_fn(entity, ent_id);
+                    node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
+                }
+            }
 
-                    if (MemoryEngine::IsValidAddress(entity) && entity != local_player_entity && ent_id != local_id && !visited_entities.count(entity)) {
-                        visited_entities.insert(entity);
-                        uint32_t ent_id_u = (uint32_t)ent_id;
-                        uint8_t flag_152 = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IS_AVATAR);
-                        bool is_player = (ent_id_u > 0x40000000) || (flag_152 != 0) || s_CachedEntityPositions.count(ent_id);
-
-                        if (is_player) {
-                            Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
-                            if (s_CachedEntityPositions.count(ent_id)) {
-                                pos = s_CachedEntityPositions[ent_id].pos;
-                            }
-
-                            if (pos.Length() > 1.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
-                                RosPlayer p{};
-                                p.instance = entity;
-                                p.id = ent_id;
-                                p.position = pos;
-                                p.health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
-                                p.max_health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
-                                p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
-                                p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
-                                p.is_bot = (ent_id_u <= 0x40000000);
-
-                                if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
-                                if (p.health <= 0 || p.health > p.max_health) p.health = 100;
-
-                                float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
-                                p.distance = dist;
-
-                                if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
-                                    snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
-
-                                    // Build procedural humanoid skeleton based on position & stance
-                                    p.has_bones = true;
-                                    float h = (p.stance == 1) ? 1.30f : ((p.stance == 2) ? 0.60f : 1.75f);
-                                    Vector3 head = p.position + Vector3(0, h, 0);
-                                    p.head_pos = head;
-                                    p.bones[BONE_HEAD]       = head;
-                                    p.bones[BONE_NECK]       = p.position + Vector3(0, h * 0.88f, 0);
-                                    p.bones[BONE_CHEST]      = p.position + Vector3(0, h * 0.72f, 0);
-                                    p.bones[BONE_PELVIS]     = p.position + Vector3(0, h * 0.48f, 0);
-                                    p.bones[BONE_L_SHOULDER] = p.bones[BONE_NECK] + Vector3(-0.25f, -0.05f, 0);
-                                    p.bones[BONE_L_ELBOW]    = p.bones[BONE_L_SHOULDER] + Vector3(-0.15f, -0.22f, 0);
-                                    p.bones[BONE_L_HAND]     = p.bones[BONE_L_ELBOW] + Vector3(0, -0.20f, 0);
-                                    p.bones[BONE_R_SHOULDER] = p.bones[BONE_NECK] + Vector3(0.25f, -0.05f, 0);
-                                    p.bones[BONE_R_ELBOW]    = p.bones[BONE_R_SHOULDER] + Vector3(0.15f, -0.22f, 0);
-                                    p.bones[BONE_R_HAND]     = p.bones[BONE_R_ELBOW] + Vector3(0, -0.20f, 0);
-                                    p.bones[BONE_L_HIP]      = p.bones[BONE_PELVIS] + Vector3(-0.16f, -0.06f, 0);
-                                    p.bones[BONE_L_KNEE]     = p.bones[BONE_L_HIP] + Vector3(0, -0.22f, 0);
-                                    p.bones[BONE_L_FOOT]     = p.bones[BONE_L_KNEE] + Vector3(0, -0.20f, 0);
-                                    p.bones[BONE_R_HIP]      = p.bones[BONE_PELVIS] + Vector3(0.16f, -0.06f, 0);
-                                    p.bones[BONE_R_KNEE]     = p.bones[BONE_R_HIP] + Vector3(0, -0.22f, 0);
-                                    p.bones[BONE_R_FOOT]     = p.bones[BONE_R_KNEE] + Vector3(0, -0.20f, 0);
-
-                                    out_players.push_back(p);
-                                }
+            // 2. Scan buckets for any unlinked or bucket-isolated entities
+            for (uintptr_t b_ptr : bucket_ptrs) {
+                uintptr_t bucket_arr = MemoryEngine::Read<uintptr_t>(b_ptr);
+                size_t bucket_cnt = MemoryEngine::Read<size_t>(b_ptr + 0x08);
+                if (MemoryEngine::IsValidAddress(bucket_arr) && bucket_cnt > 0 && bucket_cnt < 8192) {
+                    for (size_t b = 0; b < bucket_cnt; ++b) {
+                        uintptr_t bucket_node_ptr = MemoryEngine::Read<uintptr_t>(bucket_arr + b * sizeof(uintptr_t));
+                        if (MemoryEngine::IsValidAddress(bucket_node_ptr)) {
+                            uintptr_t node = MemoryEngine::Read<uintptr_t>(bucket_node_ptr);
+                            int safety = 0;
+                            while (MemoryEngine::IsValidAddress(node) && ++safety < 100) {
+                                int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
+                                uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
+                                process_entity_fn(entity, ent_id);
+                                node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
                             }
                         }
                     }
-                    node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
                 }
             }
         }
@@ -1130,7 +1169,9 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     // =========================================================================
     // ECLIPSE IMGUI DESIGN DASHBOARD (White Modern Theme)
     // =========================================================================
-    Menu::RenderHud("ECLIPSE · RosCambo");
+    char hud_title[96];
+    std::snprintf(hud_title, sizeof(hud_title), "ECLIPSE · RosCambo | E:%zu", g_TelemetryEntitiesLoaded);
+    Menu::RenderHud(hud_title);
     Menu::Render(&g_Cheat.menu_open);
 
     ImGui::Render();

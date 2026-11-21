@@ -62,7 +62,7 @@ namespace NeoXOffsets {
     // Engine Singletons:
     constexpr uintptr_t DIRECTOR_GLOBAL_PTR       = 0x3A66CD8; // cocos2d::Director::getInstance() (0x100ed1e20)
     constexpr uintptr_t LOCAL_PLAYER_MGR_PTR       = 0x39AB428; // Local Player Manager singleton (0x10089a794)
-    constexpr uintptr_t CLIENTAPP_GLOBAL_PTR       = 0x37809F0; // Verified ClientApp pointer in __DATA/__data (from 0x100899b64)
+    constexpr uintptr_t CLIENTAPP_GLOBAL_PTR       = 0x37819F0; // Exact ClientApp pointer in __DATA (from 0x100883c48: ldr x0, [base + 0x37819F0])
     constexpr uintptr_t CAMERA_GLOBAL_POOL         = 0x44CA9E0; // std::vector<Camera*> pool (0x100ec8a38)
 
     // cocos2d::Director & Scene:
@@ -72,14 +72,15 @@ namespace NeoXOffsets {
 
     // cocos2d::Camera:
     constexpr uintptr_t CAMERA_VIEW_PROJ           = 0x2E8;     // Mat4 _viewProjection (64 bytes, 0x100e48b88)
-    constexpr uintptr_t CAMERA_VIEW                = 0x228;     // Mat4 _view
-    constexpr uintptr_t CAMERA_PROJ                = 0x268;     // Mat4 _projection
+    constexpr uintptr_t CAMERA_VIEW                = 0x268;     // Mat4 _view
+    constexpr uintptr_t CAMERA_PROJ                = 0x228;     // Mat4 _projection
     constexpr uintptr_t CAMERA_FLAG                = 0x352;     // uint16_t _cameraFlag (1=Default/2D, 2/4=User1/3D)
 
     // Inside ClientApp:
     constexpr uintptr_t CLIENTAPP_LOCAL_PLAYER_ID  = 0xF68;     // str w1, [x0, #0xf68]
-    constexpr uintptr_t CLIENTAPP_FIRST_NODE       = 0xF80;     // ldr x22, [x19, #0xf80] (First entity linked list head)
-    constexpr uintptr_t CLIENTAPP_SECOND_NODE      = 0xFD0;     // ldr x21, [x19, #0xfd0] (Second entity linked list head)
+    constexpr uintptr_t CLIENTAPP_FIRST_NODE       = 0xF80;     // Map 1: Entities linked list head
+    constexpr uintptr_t CLIENTAPP_SECOND_NODE      = 0xFA8;     // Map 2: Avatars linked list head
+    constexpr uintptr_t CLIENTAPP_THIRD_NODE       = 0xFD0;     // Map 3: Vehicles/Props linked list head
     constexpr uintptr_t CLIENTAPP_ENTITY_BUCKETS   = 0xF70;     // ldr x11, [x0, #0xf70] (std::unordered_map)
     constexpr uintptr_t CLIENTAPP_BUCKET_COUNT     = 0xF78;     // ldr x9,  [x0, #0xf78]
 
@@ -89,11 +90,18 @@ namespace NeoXOffsets {
     constexpr uintptr_t HASH_NODE_VALUE            = 0x18;      // ldr x0,  [x11, #0x18] (Entity* Pointer)
 
     // Entity Object offsets (VERIFIED ARM64):
-    constexpr uintptr_t ENTITY_ID                  = 0x18;      // int32 entity_id
-    constexpr uintptr_t ENTITY_COORDS              = 0x1C;      // Vector3 world position (x@0x1c, y@0x20, z@0x24)
-    constexpr uintptr_t ENTITY_SPACE_ID            = 0x54;      // int32 space_id
+    constexpr uintptr_t ENTITY_ID                  = 0x18;      // int32 entity_id (0x10087f954)
+    constexpr uintptr_t ENTITY_COORDS              = 0x1C;      // Vector3 world position (x@0x1c, y@0x20, z@0x24) (0x10087fad0)
+    constexpr uintptr_t ENTITY_DIRECTION           = 0x28;      // Vector3 direction
+    constexpr uintptr_t ENTITY_YAW                 = 0x44;      // float yaw (0x10087fd28)
+    constexpr uintptr_t ENTITY_PITCH               = 0x48;      // float pitch (0x10087fd18)
+    constexpr uintptr_t ENTITY_ROLL                = 0x4C;      // float roll (0x10087fd08)
+    constexpr uintptr_t ENTITY_SPACE_ID            = 0x54;      // int32 space_id (0x10087f9a0)
+    constexpr uintptr_t ENTITY_VEHICLE_ID          = 0x58;      // int32 vehicle_id (0x10087f9ec)
+    constexpr uintptr_t ENTITY_IN_WORLD            = 0x5D;      // uint8_t in_world (0x10087fa84)
+    constexpr uintptr_t ENTITY_SELF_CONTROLLED     = 0x5E;      // uint8_t self_controlled (0x10087fecc: 1 if local player)
     constexpr uintptr_t ENTITY_IS_ACTIVE           = 0x5E;      // uint8_t is_active / visible
-    constexpr uintptr_t ENTITY_IS_AVATAR           = 0x152;     // uint8_t is_avatar / player flag (from 0x100881cc0)
+    constexpr uintptr_t ENTITY_IS_AVATAR           = 0x152;     // uint8_t is_avatar / player flag
     constexpr uintptr_t ENTITY_HP                  = 0x1B8;     // int32 health
     constexpr uintptr_t ENTITY_MAX_HP              = 0x1BC;     // int32 max health
     constexpr uintptr_t ENTITY_TEAM                = 0x1C4;     // int32 team
