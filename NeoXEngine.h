@@ -246,9 +246,24 @@ public:
         if (std::isnan(m00) || std::isnan(m11) || std::isnan(m22)) return false;
         float diag_sum = std::abs(m00) + std::abs(m11) + std::abs(m22);
         if (diag_sum < 0.1f) return false;
+
         // Projection value at 0xD4 (cot(fov/2)) must be reasonable
         float proj_y = MemoryEngine::Read<float>(cam + 0xD4);
         if (std::isnan(proj_y) || proj_y < 0.2f || proj_y > 20.0f) return false;
+
+        // CRUCIAL: Reject static identity/dummy camera!
+        // In the dummy/UI camera at origin: View Matrix translation at +0x70 is (0, 0, 0, 1)
+        // In 3D gameplay camera: translation represents camera position in world space
+        float tx = MemoryEngine::Read<float>(cam + 0x70);
+        float ty = MemoryEngine::Read<float>(cam + 0x74);
+        float tz = MemoryEngine::Read<float>(cam + 0x78);
+        if (std::isnan(tx) || std::isnan(ty) || std::isnan(tz)) return false;
+        float trans_mag = std::abs(tx) + std::abs(ty) + std::abs(tz);
+        if (trans_mag < 1.0f) {
+            // Static origin camera - not the active 3D gameplay camera!
+            return false;
+        }
+
         return true;
     }
 

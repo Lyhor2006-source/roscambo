@@ -11,6 +11,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <os/lock.h>
 
 #include <vector>
 #include <string>
@@ -258,6 +259,7 @@ struct CachedEntityPos {
     Vector3 pos;
     uint64_t tick;
 };
+static os_unfair_lock s_PosCacheLock = OS_UNFAIR_LOCK_INIT;
 static std::unordered_map<int, CachedEntityPos> s_CachedEntityPositions;
 
 static void Hooked_onEntityMove(uintptr_t this_ptr, int entity_id, uintptr_t a3, uintptr_t a4, const Vector3* pos_ptr, uintptr_t a6, uintptr_t a7) {
@@ -267,8 +269,10 @@ static void Hooked_onEntityMove(uintptr_t this_ptr, int entity_id, uintptr_t a3,
     }
     if (pos_ptr && MemoryEngine::IsValidAddress((uintptr_t)pos_ptr)) {
         Vector3 p = *pos_ptr; // Zero-overhead direct read in-process
-        if (p.Length() > 1.0f && std::abs(p.x) < 20000.0f && std::abs(p.y) < 20000.0f && std::abs(p.z) < 20000.0f) {
+        if (p.Length() > 1.0f && std::abs(p.x) < 25000.0f && std::abs(p.y) < 25000.0f && std::abs(p.z) < 25000.0f) {
+            os_unfair_lock_lock(&s_PosCacheLock);
             s_CachedEntityPositions[entity_id] = { p, s_FrameCount };
+            os_unfair_lock_unlock(&s_PosCacheLock);
         }
     }
     if (s_OrigOnEntityMove) {
@@ -412,11 +416,11 @@ static uintptr_t ScanHeapForCamera(uintptr_t base) {
                                         (vm_region_info_t)&info, &count, &object_name);
         if (kr != KERN_SUCCESS) break;
 
-        // Search readable & writable heap regions
-        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) && size >= 0x1000) {
+        // Search readable & writable heap regions, skip regions > 32MB to prevent memory thrashing
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) && size >= 0x1000 && size <= 0x2000000) {
             const size_t CHUNK = 0x10000;
             alignas(16) uint8_t buf[CHUNK];
-            size_t max_scan = std::min((size_t)size, (size_t)0x2000000);
+            size_t max_scan = std::min((size_t)size, (size_t)0x800000); // 8MB max per region
             for (vm_address_t cur = address; cur < address + max_scan; cur += CHUNK) {
                 size_t to_read = std::min((size_t)(address + max_scan - cur), CHUNK);
                 vm_size_t bytes_read = 0;
@@ -425,12 +429,8 @@ static uintptr_t ScanHeapForCamera(uintptr_t base) {
                     uintptr_t* ptrs = (uintptr_t*)buf;
                     for (size_t p = 0; p < n_ptrs; ++p) {
                         uintptr_t vt = ptrs[p];
-                        if (vt == neox_camerabase_vt) {
-                            uintptr_t cam = cur + p * sizeof(uintptr_t);
-                            if (ProjectionEngine::IsValidCameraBase(cam)) {
-                                return cam; // Exact 3D Gameplay Camera!
-                            }
-                        } else if (vt == neox_worldcam_vt) {
+                        // Priority 1: neox::world::Camera (wraps the active 3D gameplay camera at +0x70)
+                        if (vt == neox_worldcam_vt) {
                             uintptr_t wcam = cur + p * sizeof(uintptr_t);
                             uintptr_t base_cam = MemoryEngine::Read<uintptr_t>(wcam + 0x70);
                             if (!MemoryEngine::IsValidAddress(base_cam)) {
@@ -440,6 +440,11 @@ static uintptr_t ScanHeapForCamera(uintptr_t base) {
                                 if (ProjectionEngine::IsValidCameraBase(base_cam)) {
                                     return base_cam;
                                 }
+                            }
+                        } else if (vt == neox_camerabase_vt) {
+                            uintptr_t cam = cur + p * sizeof(uintptr_t);
+                            if (ProjectionEngine::IsValidCameraBase(cam)) {
+                                return cam; // Exact 3D Gameplay Camera!
                             }
                         } else if (vt == cocos_camera_vt && fallback_cam == 0) {
                             uintptr_t ccam = cur + p * sizeof(uintptr_t);
@@ -576,11 +581,14 @@ public:
             }
         }
 
-        // Priority 4: Background asynchronous heap scanner (NEVER blocks render loop!)
+        // Priority 4: Background asynchronous heap scanner (throttled to at most once per 3s)
         static std::atomic<bool> s_IsScanningCamera{false};
-        if (!s_ActiveCamera && !s_IsScanningCamera.load()) {
+        static double s_LastCameraScanTime = 0.0;
+        double now_cam_time = [NSDate date].timeIntervalSince1970;
+        if (!s_ActiveCamera && !s_IsScanningCamera.load() && (now_cam_time - s_LastCameraScanTime > 3.0)) {
             s_IsScanningCamera.store(true);
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            s_LastCameraScanTime = now_cam_time;
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
                 uintptr_t found_cam = ScanHeapForCamera(base);
                 if (found_cam) {
                     s_ActiveCamera = found_cam;
@@ -677,9 +685,12 @@ public:
                 }
 
                 Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
-                if (s_CachedEntityPositions.count(ent_id)) {
-                    pos = s_CachedEntityPositions[ent_id].pos;
+                os_unfair_lock_lock(&s_PosCacheLock);
+                auto it_cache = s_CachedEntityPositions.find(ent_id);
+                if (it_cache != s_CachedEntityPositions.end()) {
+                    pos = it_cache->second.pos;
                 }
+                os_unfair_lock_unlock(&s_PosCacheLock);
 
                 if (pos.Length() >= 1.0f && std::abs(pos.x) < 25000.0f && std::abs(pos.z) < 25000.0f) {
                     if (ent_id <= 0) return;
@@ -743,15 +754,23 @@ public:
         }
 
         // 5. Fallback: If hash table was empty, use live cached positions from onEntityMove
-        if (out_players.empty() && !s_CachedEntityPositions.empty()) {
+        std::vector<std::pair<int, Vector3>> snapshot_positions;
+        if (out_players.empty()) {
+            os_unfair_lock_lock(&s_PosCacheLock);
             for (const auto& kv : s_CachedEntityPositions) {
+                snapshot_positions.push_back({kv.first, kv.second.pos});
+            }
+            os_unfair_lock_unlock(&s_PosCacheLock);
+        }
+        if (out_players.empty() && !snapshot_positions.empty()) {
+            for (const auto& kv : snapshot_positions) {
                 if (kv.first == local_id) continue;
-                if (kv.second.pos.Length() < 1.0f) continue;
+                if (kv.second.Length() < 1.0f) continue;
 
                 RosPlayer p{};
                 p.instance = (uintptr_t)kv.first;
                 p.id = kv.first;
-                p.position = kv.second.pos;
+                p.position = kv.second;
                 p.health = 100;
                 p.max_health = 100;
                 p.team_id = 999;
@@ -1325,7 +1344,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     // Periodic & On-Demand Debug State Dump (to Documents/debug.txt, USB Debugger & NSLog)
     static uint64_t s_LastDebugDumpFrame = 0;
     bool usb_connected = (s_UsbClientFd.load() > 0);
-    uint64_t interval = usb_connected ? 30 : 300;
+    uint64_t interval = usb_connected ? 150 : 600; // 5s on USB (30fps), 20s background
     if (g_TriggerDebugDump || (cfg.debugScanToFile && (s_FrameCount - s_LastDebugDumpFrame >= interval)) || (usb_connected && (s_FrameCount - s_LastDebugDumpFrame >= interval))) {
         s_LastDebugDumpFrame = s_FrameCount;
         bool is_manual = g_TriggerDebugDump;
@@ -1739,9 +1758,7 @@ static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
             RenderRosCamboOverlay(cmdBuffer, metalDrawable);
         }
     }
-    // Uncap 30 FPS: If game passes duration > 0.0166667 (30 FPS cap), clamp to 0.0 so iOS display link runs at full 60/120 FPS
-    CFTimeInterval uncap_duration = (duration > 0.0166667) ? 0.0 : duration;
-    [self ros_presentDrawable:drawable afterMinimumDuration:uncap_duration];
+    [self ros_presentDrawable:drawable afterMinimumDuration:duration];
 }
 @end
 
