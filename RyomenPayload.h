@@ -1602,33 +1602,41 @@ def _pb_esp(g):
                     elif hs is not None and fs is None:
                         fs = (hs[0], hs[1] + 40.0)
                 bone_values = []
+                pub_fs = fs
+                pub_hs = hs
+                if frame_cfg and len(frame_cfg) >= 10:
+                    if fs is not None:
+                        pub_fs = _pb_aim_screen(fs, frame_cfg[8], frame_cfg[9], frame_cfg[16:22])
+                    if hs is not None:
+                        pub_hs = _pb_aim_screen(hs, frame_cfg[8], frame_cfg[9], frame_cfg[16:22])
                 skeleton_visible = mode >= 1 and draw_skeleton and fs is not None and hs is not None
-                if skeleton_visible and frame_cfg and len(frame_cfg) >= 10:
-                    feet_screen = _pb_aim_screen(fs, frame_cfg[8], frame_cfg[9], frame_cfg[16:22])
-                    head_screen = _pb_aim_screen(hs, frame_cfg[8], frame_cfg[9], frame_cfg[16:22])
-                    skeleton_visible = abs(feet_screen[1] - head_screen[1]) >= 4.0
+                if skeleton_visible and pub_fs is not None and pub_hs is not None:
+                    skeleton_visible = abs(pub_fs[1] - pub_hs[1]) >= 4.0
                 if skeleton_visible:
                     for bone_key in _PB_SKEL:
                         joint = _pb_joint_screen(e, bone_key, w2s)
                         if joint is None:
                             bone_values.append((0, 0.0, 0.0))
                         else:
-                            bone_values.append((1, joint[0], joint[1]))
+                            pj = joint
+                            if frame_cfg and len(frame_cfg) >= 10:
+                                pj = _pb_aim_screen(joint, frame_cfg[8], frame_cfg[9], frame_cfg[16:22])
+                            bone_values.append((1, pj[0], pj[1]))
                 else:
                     bone_values = [(0, 0.0, 0.0) for bone_key in _PB_SKEL]
-                on = 1 if (fs is not None or hs is not None) else 0
-                if fs is None and hs is None:
-                    fs = (0.0, 0.0); hs = (0.0, 0.0)
-                elif fs is None:
-                    fs = (hs[0], hs[1] + 40.0)
-                elif hs is None:
-                    hs = (fs[0], fs[1] - 40.0)
+                on = 1 if (pub_fs is not None or pub_hs is not None) else 0
+                if pub_fs is None and pub_hs is None:
+                    pub_fs = (0.0, 0.0); pub_hs = (0.0, 0.0)
+                elif pub_fs is None:
+                    pub_fs = (pub_hs[0], pub_hs[1] + 40.0)
+                elif pub_hs is None:
+                    pub_hs = (pub_fs[0], pub_fs[1] - 40.0)
                 nm = nick.strip().replace(' ', '_').replace('\t', '_').replace('\r', '').replace('\n', '').replace('|', '_')[:24]
                 if not nm:
                     nm = 'Bot' if bot else 'Player'
                 bone_text = ';'.join(['%d %.5f %.5f' % v for v in bone_values])
                 lines.append('%.4f %.4f %.4f %.4f %d %.2f %.2f %.2f %.2f %.2f %.2f %d %d %d %d %.3f %d %d %d %d %d %d %d %s|%s|%d' %
-                    (fs[0], fs[1], hs[0], hs[1], on, p.x, p.y, p.z, vx, vy, vz,
+                    (pub_fs[0], pub_fs[1], pub_hs[0], pub_hs[1], on, p.x, p.y, p.z, vx, vy, vz,
                      hp, mhp, enemy, vis, dist, kn, bot, team, sh, msh, 1 if vid else 0, eid, nm, bone_text, _pb_weapon_kind(e)))
                 aim_candidate = enemy != 0 and not (hide_bots and bot)
                 if on and aim_candidate:

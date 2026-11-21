@@ -1428,6 +1428,38 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     bool is_scoped = false;
     std::vector<RosPlayer> players;
 
+    // Always attempt active camera and VP matrix extraction for fallback & 3D skeleton rendering
+    ProjectionEngine::FindActiveCamera(&s_ActiveCamera);
+    if (s_ActiveCamera != 0) {
+        ProjectionEngine::ExtractViewProjection(vp_matrix, s_ActiveCamera);
+    }
+
+    auto NormalizeScreenPt = [&](Vector2 pt) -> Vector2 {
+        if (screenSize.width <= 0 || screenSize.height <= 0) return pt;
+        // Handle normalized coordinates [0.0, 1.0] or [-1.0, 1.0] from NeoX Python w2s
+        if (std::abs(pt.x) <= 2.0f && std::abs(pt.y) <= 2.0f) {
+            float nx = pt.x;
+            float ny = pt.y;
+            if (nx < 0.0f || ny < 0.0f) {
+                nx = (nx + 1.0f) * 0.5f;
+                ny = (1.0f - ny) * 0.5f;
+            }
+            return Vector2(nx * screenSize.width, ny * screenSize.height);
+        }
+        // Handle Retina physical framebuffer resolution downscaling to UIKit points
+        if (pt.x > screenSize.width * 1.3f || pt.y > screenSize.height * 1.3f) {
+            float scale_x = pt.x / screenSize.width;
+            float scale_y = pt.y / screenSize.height;
+            if (scale_x > 1.4f && scale_y > 1.4f) {
+                float native_scale = [UIScreen mainScreen].nativeScale;
+                if (native_scale > 1.0f) {
+                    return Vector2(pt.x / native_scale, pt.y / native_scale);
+                }
+            }
+        }
+        return pt;
+    };
+
     if (has_bridge && snap.players.size() > 0) {
         local_pos = snap.local_pos;
         for (const auto& bp : snap.players) {
@@ -1438,17 +1470,18 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             p.health = bp.health;
             p.max_health = bp.max_health;
             p.team_id = bp.team_id;
+            p.is_enemy = bp.is_enemy;
             p.is_bot = bp.is_bot;
             p.distance = bp.distance;
             p.is_visible = bp.is_visible;
             p.is_knocked = bp.is_knocked;
             p.has_bones = true;
             p.has_bridge_w2s = bp.on_screen;
-            p.crown_screen_bridge = Vector2(bp.hs_x, bp.hs_y);
-            p.feet_screen_bridge = Vector2(bp.fs_x, bp.fs_y);
+            p.crown_screen_bridge = NormalizeScreenPt(Vector2(bp.hs_x, bp.hs_y));
+            p.feet_screen_bridge = NormalizeScreenPt(Vector2(bp.fs_x, bp.fs_y));
             for (int b = 0; b < 16; ++b) {
                 p.bones_screen_valid[b] = bp.bones[b].valid;
-                p.bones_screen[b] = Vector2(bp.bones[b].x, bp.bones[b].y);
+                p.bones_screen[b] = NormalizeScreenPt(Vector2(bp.bones[b].x, bp.bones[b].y));
             }
             std::strncpy(p.name, bp.name, sizeof(p.name) - 1);
             players.push_back(p);
@@ -1501,7 +1534,14 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
     if (g_Cheat.esp_enabled) {
         for (const auto& player : players) {
-            if (g_Cheat.team_check && player.team_id == local_team) continue;
+            if (g_Cheat.team_check) {
+                if (player.has_bridge_w2s) {
+                    if (!player.is_enemy) continue;
+                } else if (local_team > 0 && player.team_id > 0 && player.team_id == local_team) {
+                    continue;
+                }
+            }
+            if (g_Cheat.esp_hide_bots && player.is_bot) continue;
 
             Vector2 crown_screen, feet_screen;
             bool crown_w2s = false;
@@ -1510,15 +1550,30 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             if (player.has_bridge_w2s) {
                 crown_screen = player.crown_screen_bridge;
                 feet_screen = player.feet_screen_bridge;
-                crown_w2s = true;
-                feet_w2s = true;
-            } else {
+                if (crown_screen.x >= -150.0f && crown_screen.x <= screenSize.width + 150.0f &&
+                    crown_screen.y >= -150.0f && crown_screen.y <= screenSize.height + 150.0f) {
+                    crown_w2s = true;
+                }
+                if (feet_screen.x >= -150.0f && feet_screen.x <= screenSize.width + 150.0f &&
+                    feet_screen.y >= -150.0f && feet_screen.y <= screenSize.height + 150.0f) {
+                    feet_w2s = true;
+                }
+            }
+
+            if (!crown_w2s || !feet_w2s) {
                 float h_crown = (player.stance == 1 ? 1.40f : (player.stance == 2 ? 0.70f : 1.85f));
                 Vector3 crown_3d = player.position + Vector3(0, h_crown, 0);
                 Vector3 feet_3d = player.position;
 
-                crown_w2s = ProjectionEngine::WorldToScreen(crown_3d, crown_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
-                feet_w2s  = ProjectionEngine::WorldToScreen(feet_3d, feet_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
+                Vector2 native_crown, native_feet;
+                if (ProjectionEngine::WorldToScreen(crown_3d, native_crown, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
+                    crown_screen = native_crown;
+                    crown_w2s = true;
+                }
+                if (ProjectionEngine::WorldToScreen(feet_3d, native_feet, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
+                    feet_screen = native_feet;
+                    feet_w2s = true;
+                }
             }
 
             if (&player == &players[0]) {

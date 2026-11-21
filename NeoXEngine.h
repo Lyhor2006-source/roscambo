@@ -198,6 +198,7 @@ struct RosPlayer {
 
     // RyomenX Bridge 2D screen positions & visibility
     bool has_bridge_w2s = false;
+    bool is_enemy = true;
     Vector2 crown_screen_bridge = {0, 0};
     Vector2 feet_screen_bridge = {0, 0};
     bool is_visible = false;
