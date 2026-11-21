@@ -1305,7 +1305,24 @@ static void SetMenuOpen(bool open) {
 // =============================================================================
 // MAIN OVERLAY RENDER LOOP (Encoded into the Game's Command Buffer)
 // =============================================================================
+static std::mutex s_OverlayRenderMutex;
+static std::atomic<bool> s_IsRenderingOverlay{false};
+
 static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
+    if (s_IsRenderingOverlay.exchange(true)) {
+        return; // Prevent thread collision / re-entrancy
+    }
+    std::unique_lock<std::mutex> lock(s_OverlayRenderMutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        s_IsRenderingOverlay.store(false);
+        return;
+    }
+    struct RenderGuard {
+        ~RenderGuard() {
+            s_IsRenderingOverlay.store(false);
+        }
+    } renderGuard;
+
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     if (screenSize.width < screenSize.height) {
         CGFloat tmp = screenSize.width;
@@ -1336,6 +1353,11 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
     if (!encoder) return;
+
+    ImGuiContext* g = ImGui::GetCurrentContext();
+    if (g && g->WithinFrameScope) {
+        ImGui::EndFrame();
+    }
 
     ImGui_ImplMetal_NewFrame(passDesc);
     ImGui::NewFrame();
@@ -1926,14 +1948,30 @@ static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration;
 @end
 
+static inline bool ShouldSkipOverlay(id<CAMetalDrawable> metalDrawable) {
+    if (!metalDrawable) return true;
+    @try {
+        CAMetalLayer* layer = metalDrawable.layer;
+        if (layer && layer.delegate) {
+            NSString* cls = NSStringFromClass([layer.delegate class]);
+            if ([cls rangeOfString:@"Ryomen" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                return true;
+            }
+        }
+    } @catch (...) {}
+    return false;
+}
+
 @implementation RosMetalHookHelper
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
-        if (cmdBuffer.device) {
-            InitializeMetalOverlay(cmdBuffer.device);
-            RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+        if (!ShouldSkipOverlay(metalDrawable)) {
+            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+            if (cmdBuffer.device) {
+                InitializeMetalOverlay(cmdBuffer.device);
+                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+            }
         }
     }
     [self ros_presentDrawable:drawable];
@@ -1942,10 +1980,12 @@ static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
-        if (cmdBuffer.device) {
-            InitializeMetalOverlay(cmdBuffer.device);
-            RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+        if (!ShouldSkipOverlay(metalDrawable)) {
+            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+            if (cmdBuffer.device) {
+                InitializeMetalOverlay(cmdBuffer.device);
+                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+            }
         }
     }
     [self ros_presentDrawable:drawable atTime:presentationTime];
@@ -1954,10 +1994,12 @@ static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
-        if (cmdBuffer.device) {
-            InitializeMetalOverlay(cmdBuffer.device);
-            RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+        if (!ShouldSkipOverlay(metalDrawable)) {
+            id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
+            if (cmdBuffer.device) {
+                InitializeMetalOverlay(cmdBuffer.device);
+                RenderRosCamboOverlay(cmdBuffer, metalDrawable);
+            }
         }
     }
     [self ros_presentDrawable:drawable afterMinimumDuration:duration];
