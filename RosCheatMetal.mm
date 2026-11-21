@@ -17,6 +17,13 @@
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <mutex>
+#include <atomic>
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -844,8 +851,143 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const
                     [task resume];
                 }
             }
+
+            // 5. Update USB Live Debugger stream buffer (Port 1337)
+            {
+                std::lock_guard<std::mutex> lock(s_DebugReportMutex);
+                s_LatestDebugReport = [log UTF8String];
+            }
         }
     });
+}
+
+// =============================================================================
+// USB LIVE DEBUGGER TCP SERVER (Port 1337 via USBMUX)
+// =============================================================================
+static int s_UsbDebugServerFd = -1;
+static std::atomic<int> s_UsbClientFd{-1};
+static std::string s_LatestDebugReport = "";
+static std::mutex s_DebugReportMutex;
+
+static void* UsbDebugServerThread(void* arg) {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        NSLog(@"[RosCambo-USB] socket() error: %s", strerror(errno));
+        return NULL;
+    }
+    
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(1337);
+    
+    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        NSLog(@"[RosCambo-USB] bind() failed on port 1337: %s", strerror(errno));
+        close(server_fd);
+        return NULL;
+    }
+    
+    if (listen(server_fd, 4) < 0) {
+        NSLog(@"[RosCambo-USB] listen() failed: %s", strerror(errno));
+        close(server_fd);
+        return NULL;
+    }
+    
+    s_UsbDebugServerFd = server_fd;
+    NSLog(@"[RosCambo-USB] USB Live Debugger listening on port 1337 over usbmuxd.");
+    
+    while (true) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (client_fd < 0) {
+            usleep(100000);
+            continue;
+        }
+        
+        int set_nosigpipe = 1;
+        setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&set_nosigpipe, sizeof(int));
+        
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000; // 50ms
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        
+        NSLog(@"[RosCambo-USB] PC connected to Live USB Debugger (fd=%d)!", client_fd);
+        s_UsbClientFd.store(client_fd);
+        
+        const char* banner = "=== ROSCAMBO ECLIPSE USB LIVE DEBUGGER CONNECTED ===\n";
+        send(client_fd, banner, strlen(banner), 0);
+        
+        char rx_buf[256];
+        while (s_UsbClientFd.load() == client_fd) {
+            ssize_t n = recv(client_fd, rx_buf, sizeof(rx_buf) - 1, 0);
+            if (n > 0) {
+                rx_buf[n] = '\0';
+                std::string cmd(rx_buf);
+                while (!cmd.empty() && (cmd.back() == '\r' || cmd.back() == '\n' || cmd.back() == ' ')) {
+                    cmd.pop_back();
+                }
+                NSLog(@"[RosCambo-USB] PC command: %s", cmd.c_str());
+                if (cmd == "SCAN" || cmd == "CAM") {
+                    uintptr_t base = MemoryEngine::GetBaseAddress();
+                    uintptr_t found = ScanHeapForCamera(base);
+                    if (found) s_ActiveCamera = found;
+                    const char* res = found ? "[OK] Camera scanned and found!\n" : "[INFO] Camera scan complete.\n";
+                    send(client_fd, res, strlen(res), 0);
+                } else if (cmd == "DUMP") {
+                    g_TriggerDebugDump = true;
+                    const char* res = "[OK] Dump triggered.\n";
+                    send(client_fd, res, strlen(res), 0);
+                } else if (cmd == "ESP") {
+                    Menu::Cfg().esp = !Menu::Cfg().esp;
+                    const char* res = Menu::Cfg().esp ? "[OK] ESP Enabled\n" : "[OK] ESP Disabled\n";
+                    send(client_fd, res, strlen(res), 0);
+                } else if (cmd == "PING") {
+                    send(client_fd, "PONG\n", 5, 0);
+                }
+            } else if (n == 0) {
+                break;
+            } else {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    break;
+                }
+            }
+            
+            std::string to_send;
+            {
+                std::lock_guard<std::mutex> lock(s_DebugReportMutex);
+                if (!s_LatestDebugReport.empty()) {
+                    to_send = std::move(s_LatestDebugReport);
+                    s_LatestDebugReport.clear();
+                }
+            }
+            if (!to_send.empty()) {
+                std::string packet = to_send + "\n<<<ROSCAMBO_EOF>>>\n";
+                ssize_t sent = send(client_fd, packet.c_str(), packet.length(), 0);
+                if (sent < 0) {
+                    break;
+                }
+            }
+            
+            usleep(50000); // 50ms poll
+        }
+        
+        close(client_fd);
+        s_UsbClientFd.store(-1);
+        NSLog(@"[RosCambo-USB] PC disconnected from Live USB Debugger.");
+    }
+    return NULL;
+}
+
+static void StartUsbDebugServer() {
+    pthread_t thread;
+    pthread_create(&thread, NULL, UsbDebugServerThread, NULL);
+    pthread_detach(thread);
 }
 
 // =============================================================================
@@ -1084,9 +1226,11 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     g_TelemetryEntitiesLoaded = players.size();
     g_TelemetryVpValid = ProjectionEngine::IsValidViewProjMatrix(vp_matrix);
 
-    // Periodic & On-Demand Debug State Dump (to Documents/debug.txt & USB NSLog)
+    // Periodic & On-Demand Debug State Dump (to Documents/debug.txt, USB Debugger & NSLog)
     static uint64_t s_LastDebugDumpFrame = 0;
-    if (g_TriggerDebugDump || (cfg.debugScanToFile && (s_FrameCount - s_LastDebugDumpFrame >= 300))) {
+    bool usb_connected = (s_UsbClientFd.load() > 0);
+    uint64_t interval = usb_connected ? 30 : 300;
+    if (g_TriggerDebugDump || (cfg.debugScanToFile && (s_FrameCount - s_LastDebugDumpFrame >= interval)) || (usb_connected && (s_FrameCount - s_LastDebugDumpFrame >= interval))) {
         s_LastDebugDumpFrame = s_FrameCount;
         bool is_manual = g_TriggerDebugDump;
         g_TriggerDebugDump = false;
@@ -1559,5 +1703,6 @@ static void InstallMetalPresentHooks() {
 __attribute__((constructor)) static void Entry() {
     InstallMetalPresentHooks();
     InstallVTableHooks();
-    NSLog(@"[RosCamboMod] Loaded with Metal Present Hook, VTable Entity Interceptor, Circular Avatar & Gesture Support.");
+    StartUsbDebugServer();
+    NSLog(@"[RosCamboMod] Loaded with Metal Present Hook, VTable Entity Interceptor, USB Live Debugger (Port 1337).");
 }
