@@ -29,6 +29,7 @@ LDFLAGS = $(ARCHS) $(MIN_VER) $(ISYSROOT) -dynamiclib \
           -install_name @executable_path/roscheat.dylib
 
 SRCS = RosCheatMetal.mm \
+       Menu.cpp \
        imgui/imgui.cpp \
        imgui/imgui_draw.cpp \
        imgui/imgui_tables.cpp \

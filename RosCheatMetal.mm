@@ -22,6 +22,7 @@
 #include "NeoXEngine.h"
 #include "ImGuiTheme.h"
 #include "AvatarData.h"
+#include "Menu.h"
 
 enum AimTriggerMode : int {
     TRIGGER_ALWAYS = 0,
@@ -564,9 +565,10 @@ static void InitializeMetalOverlay(id<MTLDevice> device) {
     io.IniFilename = nullptr; // Stateless configuration
     io.MouseDrawCursor = false;
 
-    ApplyWizardIOSTheme();
+    Menu::ApplyWhiteTheme(1.0f, ImVec4(0.20f, 0.45f, 1.0f, 1.0f));
     ImGui_ImplMetal_Init(device);
     LoadAvatarTexture(device);
+    g_MenuAvatarTexture = (__bridge void*)s_AvatarTexture;
 
     s_ImGuiReady = true;
 }
@@ -712,6 +714,42 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     ImGui_ImplMetal_NewFrame(passDesc);
     ImGui::NewFrame();
 
+    // Sync Cheat Configurations with ECLIPSE Menu
+    Menu::Config& cfg = Menu::Cfg();
+    g_Cheat.esp_enabled = cfg.espEnabled;
+    g_Cheat.esp_box = cfg.espBox;
+    g_Cheat.esp_box_type = cfg.espBoxStyle;
+    g_Cheat.esp_skeleton = cfg.espSkeleton;
+    g_Cheat.esp_snaplines = cfg.espSnaplines;
+    g_Cheat.esp_name = cfg.espName;
+    g_Cheat.esp_health = cfg.espHealth;
+    g_Cheat.esp_distance = cfg.espDistance;
+    g_Cheat.esp_crosshair = cfg.espCrosshair;
+    g_Cheat.esp_offscreen_360 = cfg.espOffscreen360;
+    g_Cheat.max_esp_distance = cfg.espMaxDistance;
+    g_Cheat.box_thickness = cfg.boxThickness;
+    g_Cheat.line_thickness = cfg.lineThickness;
+    g_Cheat.skeleton_thickness = cfg.skeletonThickness;
+    g_Cheat.team_check = cfg.teamCheck;
+    g_Cheat.aimbot_enabled = cfg.aimEnabled;
+    g_Cheat.aim_silent = cfg.silentAim;
+    g_Cheat.aim_360 = cfg.aim360;
+    g_Cheat.aim_target_bone = cfg.aimBone;
+    g_Cheat.aim_trigger_mode = cfg.aimActivation;
+    g_Cheat.aim_snap_mode = cfg.aimSnapMode;
+    g_Cheat.aim_skill_ratio = cfg.aimSkillRatio;
+    g_Cheat.aim_fov = cfg.aimFov;
+    g_Cheat.aim_smooth = cfg.aimSmooth;
+    g_Cheat.draw_fov_circle = cfg.aimDrawFov;
+    g_Cheat.ghillie_terrain_filter = cfg.ghillieSpaceData;
+
+    // Update runtime telemetry exports
+    g_TelemetryClientApp = (unsigned long long)s_CapturedEntityManager;
+    g_TelemetryMoveHits = s_MoveHookHits;
+    g_TelemetryCreateHits = s_CreateHookHits;
+    g_TelemetryCachedPositions = s_CachedEntityPositions.size();
+    g_TelemetryEntitiesLoaded = 0; // populated below
+
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
 
     Vector3 local_pos;
@@ -723,6 +761,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     std::vector<RosPlayer> players;
 
     RosGameScanner::FetchState(players, local_pos, local_team, vp_matrix, camera_yaw, is_firing, is_scoped);
+    g_TelemetryEntitiesLoaded = players.size();
 
     Vector2 center(screenSize.width * 0.5f, screenSize.height * 0.5f);
     float closest_aim_dist = g_Cheat.aim_360 ? 99999.0f : g_Cheat.aim_fov;
@@ -901,8 +940,10 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             s_IsDraggingAvatar = false;
         }
 
-        // Outer Glowing Neon Ring
-        ImU32 ringCol = g_Cheat.menu_open ? IM_COL32(255, 60, 80, 255) : IM_COL32(0, 240, 255, 240);
+        // Outer Glowing Accent Ring
+        Menu::Config& cur_cfg = Menu::Cfg();
+        ImVec4 acc_col = ImVec4(cur_cfg.accent[0], cur_cfg.accent[1], cur_cfg.accent[2], 1.0f);
+        ImU32 ringCol = g_Cheat.menu_open ? IM_COL32(255, 60, 80, 255) : ImGui::ColorConvertFloat4ToU32(acc_col);
         fg_draw->AddCircle(circle_center, radius + 2.5f, ringCol, 36, 3.0f);
         fg_draw->AddCircle(circle_center, radius + 4.5f, ringCol & 0x40FFFFFF, 36, 1.5f);
 
@@ -929,228 +970,10 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     }
 
     // =========================================================================
-    // WIZARD IOS DASHBOARD UI LAYOUT (Clean Rules of Survival Content)
+    // ECLIPSE IMGUI DESIGN DASHBOARD (White Modern Theme)
     // =========================================================================
-    if (g_Cheat.menu_open) {
-        ImGui::SetNextWindowSize(ImVec2(560, 370), ImGuiCond_FirstUseEver);
-        ImGuiWindowFlags win_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
-
-        if (ImGui::Begin("##WizardDashboard", nullptr, win_flags)) {
-            // -----------------------------------------------------------------
-            // LEFT SIDEBAR (Mascot + Navigation + Close Action)
-            // -----------------------------------------------------------------
-            ImGui::BeginChild("Sidebar", ImVec2(140, 0), true);
-
-            // Mascot Avatar & Header Title
-            ImVec2 badge_p = ImGui::GetCursorScreenPos();
-            ImDrawList* sdraw = ImGui::GetWindowDrawList();
-            ImVec2 mascot_center = ImVec2(badge_p.x + 60, badge_p.y + 25);
-            float mascot_r = 22.0f;
-
-            if (s_AvatarTexture) {
-                sdraw->AddImageRounded((ImTextureID)(__bridge void*)s_AvatarTexture,
-                                       ImVec2(mascot_center.x - mascot_r, mascot_center.y - mascot_r),
-                                       ImVec2(mascot_center.x + mascot_r, mascot_center.y + mascot_r),
-                                       ImVec2(0, 0), ImVec2(1, 1),
-                                       IM_COL32(255, 255, 255, 255), mascot_r);
-                sdraw->AddCircle(mascot_center, mascot_r + 1.5f, IM_COL32(0, 240, 255, 240), 32, 2.0f);
-            } else {
-                sdraw->AddCircleFilled(mascot_center, mascot_r, IM_COL32(0, 160, 245, 200));
-                sdraw->AddCircle(mascot_center, mascot_r + 1.5f, IM_COL32(255, 255, 255, 240), 32, 1.5f);
-                sdraw->AddText(ImVec2(badge_p.x + 52, badge_p.y + 16), IM_COL32(255, 255, 255, 255), "ROS");
-            }
-
-            ImGui::Dummy(ImVec2(0, 50));
-
-            // Clean Sidebar Header
-            ImGui::SetCursorPosX(24);
-            ImGui::TextColored(ImVec4(0.85f, 0.92f, 1.0f, 1.0f), "RosCambo");
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            auto DrawNavBtn = [](const char* label, int index, int& current) {
-                bool is_active = (current == index);
-                if (is_active) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.60f, 0.90f, 0.85f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.06f, 0.10f, 0.16f, 0.60f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.75f, 0.85f, 1.0f));
-                }
-                if (ImGui::Button(label, ImVec2(118, 36))) {
-                    current = index;
-                }
-                ImGui::PopStyleColor(2);
-                ImGui::Spacing();
-            };
-
-            DrawNavBtn(" Visuals", 0, g_Cheat.active_nav_tab);
-            DrawNavBtn(" Aim Menu", 1, g_Cheat.active_nav_tab);
-            DrawNavBtn(" Settings", 2, g_Cheat.active_nav_tab);
-
-            // Close button at bottom of sidebar
-            ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 65);
-            ImGui::SetCursorPosX(12);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.20f, 0.25f, 0.75f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.30f, 0.90f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            if (ImGui::Button("Close Menu", ImVec2(118, 30))) {
-                SetMenuOpen(false);
-            }
-            ImGui::PopStyleColor(3);
-
-            ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 25);
-            ImGui::SetCursorPosX(45);
-            ImGui::TextColored(ImVec4(0.5f, 0.55f, 0.65f, 0.8f), "v6.0");
-
-            ImGui::EndChild();
-
-            ImGui::SameLine();
-
-            // -----------------------------------------------------------------
-            // RIGHT CONTENT PANEL
-            // -----------------------------------------------------------------
-            ImGui::BeginChild("ContentArea", ImVec2(0, 0), false);
-
-            // Top-Right [X] Close Button
-            float content_avail = ImGui::GetContentRegionAvail().x;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + content_avail - 32.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.16f, 0.22f, 0.8f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.20f, 0.25f, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.95f, 1.0f, 1.0f));
-            if (ImGui::Button("X##TopClose", ImVec2(28, 26))) {
-                SetMenuOpen(false);
-            }
-            ImGui::PopStyleColor(3);
-
-            ImGui::SetCursorPosY(10);
-
-            if (g_Cheat.active_nav_tab == 0) {
-                // VISUALS TAB
-                auto DrawCapsuleTab = [](const char* label, int index, int& active) {
-                    bool selected = (active == index);
-                    if (selected) {
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.62f, 0.92f, 1.0f));
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.13f, 0.20f, 0.60f));
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.72f, 0.85f, 1.0f));
-                    }
-                    float btn_w = ImGui::CalcTextSize(label).x + 24.0f;
-                    if (btn_w < 85.0f) btn_w = 85.0f;
-                    if (ImGui::Button(label, ImVec2(btn_w, 28))) {
-                        active = index;
-                    }
-                    ImGui::PopStyleColor(2);
-                    ImGui::SameLine();
-                };
-
-                DrawCapsuleTab("Player ESP", 0, g_Cheat.active_visual_subtab);
-                DrawCapsuleTab("Skeletons", 1, g_Cheat.active_visual_subtab);
-                DrawCapsuleTab("Radar 360", 2, g_Cheat.active_visual_subtab);
-                ImGui::NewLine();
-                ImGui::Spacing();
-
-                if (g_Cheat.active_visual_subtab == 0) {
-                    // PLAYER ESP SUB-TAB
-                    DrawSettingSwitch("Master ESP", &g_Cheat.esp_enabled);
-                    DrawSettingSwitch("ESP Box", &g_Cheat.esp_box);
-                    DrawSettingSwitch("Precision Crosshair", &g_Cheat.esp_crosshair);
-                    DrawSettingSwitch("Health Bar Indicator", &g_Cheat.esp_health);
-                    DrawSettingSwitch("Player Distance (m)", &g_Cheat.esp_distance);
-                    DrawSettingSwitch("Player / Bot Names", &g_Cheat.esp_name);
-                    DrawSettingSwitch("Snaplines", &g_Cheat.esp_snaplines);
-
-                    DrawSettingSlider("Box Border Thickness", &g_Cheat.box_thickness, 0.5f, 5.0f, "%.1f px");
-                    DrawSettingSlider("Line Transparency", &g_Cheat.line_transparency, 0.0f, 100.0f, "%.0f %%");
-                    DrawSettingSlider("Line Thickness", &g_Cheat.line_thickness, 0.5f, 5.0f, "%.1f px");
-                    DrawSettingSlider("Max Render Distance", &g_Cheat.max_esp_distance, 100.0f, 1000.0f, "%.0f m");
-                } else if (g_Cheat.active_visual_subtab == 1) {
-                    // SKELETON SUB-TAB
-                    DrawSettingSwitch("Skeleton / Bone ESP", &g_Cheat.esp_skeleton);
-                    DrawSettingSwitch("Team Filter (Ignore Allies)", &g_Cheat.team_check);
-                    DrawSettingSlider("Bone Joint Thickness", &g_Cheat.skeleton_thickness, 0.5f, 4.0f, "%.1f px");
-
-                    ImGui::Spacing();
-                    ImGui::Separator();
-                    ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(0.0f, 0.85f, 1.0f, 1.0f), "Rules of Survival Bone Hierarchy:");
-                    ImGui::BulletText("Head, Neck, Chest, Pelvis");
-                    ImGui::BulletText("Left/Right Shoulders, Elbows, Hands");
-                    ImGui::BulletText("Left/Right Hips, Knees, Feet");
-                } else {
-                    // RADAR 360 SUB-TAB
-                    DrawSettingSwitch("360 Offscreen Threat Arrows", &g_Cheat.esp_offscreen_360);
-                    DrawSettingSwitch("Ghillie Terrain Z-Filter", &g_Cheat.ghillie_terrain_filter);
-                    DrawSettingSwitch("Bot Hunter Tagging", &g_Cheat.esp_bot_indicator);
-                    ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(0.7f, 0.75f, 0.85f, 1.0f), "Radar displays top-right mini-radar and red perimeter threat arrows.");
-                }
-            } else if (g_Cheat.active_nav_tab == 1) {
-                // AIM MENU TAB
-                DrawSettingSwitch("Master Aimbot", &g_Cheat.aimbot_enabled);
-                DrawSettingSwitch("Silent Aim", &g_Cheat.aim_silent);
-                DrawSettingSwitch("Aim 360 (Unrestricted FOV)", &g_Cheat.aim_360);
-                DrawSettingSwitch("Draw FOV Circle", &g_Cheat.draw_fov_circle);
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                // Target Bone Selection
-                const char* bone_names[] = { "Head", "Neck", "Chest", "Pelvis" };
-                ImGui::TextUnformatted("Target Bone");
-                ImGui::PushItemWidth(-1);
-                ImGui::Combo("##TargetBoneCombo", &g_Cheat.aim_target_bone, bone_names, IM_ARRAYSIZE(bone_names));
-                ImGui::PopItemWidth();
-                ImGui::Spacing();
-
-                // Trigger Conditions
-                const char* trigger_modes[] = { "Always", "Scope Only", "Firing Only", "Scope & Firing" };
-                ImGui::TextUnformatted("Trigger Condition");
-                ImGui::PushItemWidth(-1);
-                ImGui::Combo("##TriggerCombo", &g_Cheat.aim_trigger_mode, trigger_modes, IM_ARRAYSIZE(trigger_modes));
-                ImGui::PopItemWidth();
-                ImGui::Spacing();
-
-                // Speed Mode Preset
-                const char* snap_options[] = { "Custom Smooth", "Aim 50% (+50% Player Skill)", "Aim 100% (Instant Rage)" };
-                ImGui::TextUnformatted("Aim Speed Mode");
-                ImGui::PushItemWidth(-1);
-                ImGui::Combo("##SnapCombo", &g_Cheat.aim_snap_mode, snap_options, IM_ARRAYSIZE(snap_options));
-                ImGui::PopItemWidth();
-                ImGui::Spacing();
-
-                if (g_Cheat.aim_snap_mode == 1) {
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "%s", "[Skill Blend Mode] 50% Magnetism + 50% Touch Skill");
-                    DrawSettingSlider("Assist Magnetism Ratio", &g_Cheat.aim_skill_ratio, 0.10f, 0.90f, "%.2f");
-                }
-
-                DrawSettingSlider("Aim FOV Radius", &g_Cheat.aim_fov, 30.0f, 400.0f, "%.0f px");
-                DrawSettingSlider("Aim Smooth Factor", &g_Cheat.aim_smooth, 1.0f, 25.0f, "%.1f");
-            } else {
-                // SETTINGS TAB
-                ImGui::TextColored(ImVec4(0.0f, 0.85f, 1.0f, 1.0f), "Rules of Survival - RosCambo Private Server");
-                ImGui::Spacing();
-                DrawSettingSwitch("Ghillie SpaceData Synced", &g_Cheat.ghillie_terrain_filter);
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::Text("Active Target Bone: %s", (g_Cheat.aim_target_bone == 0 ? "Head" : (g_Cheat.aim_target_bone == 1 ? "Neck" : (g_Cheat.aim_target_bone == 2 ? "Chest" : "Pelvis"))));
-                ImGui::Text("Active Trigger State: %s", IsAimbotTriggerConditionMet(is_firing, is_scoped) ? "ARMED" : "IDLE");
-                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.4f, 1.0f), "ClientApp: 0x%lx", s_CapturedEntityManager);
-                ImGui::Text("Hook Hits (Move: %llu | Create: %llu)", s_MoveHookHits, s_CreateHookHits);
-                ImGui::Text("Cached Positions: %lu", s_CachedEntityPositions.size());
-                ImGui::Text("Entities Loaded: %lu", players.size());
-            }
-
-            ImGui::EndChild();
-        }
-        ImGui::End();
-    }
+    Menu::RenderHud("ECLIPSE · RosCambo");
+    Menu::Render(&g_Cheat.menu_open);
 
     ImGui::Render();
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), commandBuffer, encoder);
