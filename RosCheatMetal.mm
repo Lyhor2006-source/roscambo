@@ -51,7 +51,7 @@ struct RosCheatConfig {
     bool esp_enabled = true;
     bool esp_box = true;
     int esp_box_type = 1; // 0=2D Box, 1=Corner Box, 2=Filled Box
-    bool esp_snaplines = true;
+    bool esp_snaplines = false;
     int snapline_pos = 0; // 0=Bottom, 1=Crosshair, 2=Top
     bool esp_skeleton = true;
     bool esp_health = true;
@@ -70,7 +70,7 @@ struct RosCheatConfig {
     // Rules of Survival Aimbot Features
     bool aimbot_enabled = true;
     int aim_target_bone = BONE_HEAD; // 0=Head, 1=Neck, 2=Chest, 3=Pelvis
-    int aim_trigger_mode = TRIGGER_ALWAYS; // 0=Always, 1=Scope Only, 2=Firing Only, 3=Scope & Firing
+    int aim_trigger_mode = TRIGGER_SCOPE_AND_FIRING; // 0=Always, 1=Scope Only, 2=Firing Only, 3=Scope & Firing
     bool aim_silent = false;
     bool aim_360 = false;
     int aim_snap_mode = 1; // 0=Custom Smooth, 1=Aim 50% (+50% Player Skill), 2=Aim 100% (Instant Rage)
@@ -266,6 +266,14 @@ static void Hooked_onEntityMove(uintptr_t this_ptr, int entity_id, uintptr_t a3,
     s_MoveHookHits++;
     if (this_ptr > 0x100000000ULL) {
         s_CapturedEntityManager = this_ptr;
+    }
+    // Filter out dropped weapon/item/prop entities from position cache to prevent thread spam
+    uint32_t uid = (uint32_t)entity_id;
+    if (uid >= 7000000 && uid < 8000000) {
+        if (s_OrigOnEntityMove) {
+            s_OrigOnEntityMove(this_ptr, entity_id, a3, a4, pos_ptr, a6, a7);
+        }
+        return;
     }
     if (pos_ptr && MemoryEngine::IsValidAddress((uintptr_t)pos_ptr)) {
         Vector3 p = *pos_ptr; // Zero-overhead direct read in-process
@@ -672,7 +680,18 @@ public:
 
                 int read_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_ID);
                 if (read_id > 0) ent_id = read_id;
+                if (ent_id <= 0) return;
 
+                uint32_t uid = (uint32_t)ent_id;
+
+                // [CRITICAL FIX 1] FILTER OUT DROPPED WEAPONS, LOOT ITEMS, CRATES & SCENE PROPS
+                // NetEase entity ID layout:
+                // - 7000000..7999999 = DropItem / Weapon pickups / Ammo / Crates (e.g. 7000001..7000053)
+                // - 9000000..9999999 = Vehicles (e.g. 9000194)
+                if (uid >= 7000000 && uid < 8000000) return; // DropItem / Loot crate / Weapon
+                if (uid >= 9000000 && uid < 9999999) return; // Vehicles
+
+                // Local player detection
                 uint8_t self_ctrl = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_SELF_CONTROLLED);
                 if (self_ctrl != 0 || entity == local_player_entity || (local_id > 0 && ent_id == local_id)) {
                     Vector3 lp = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
@@ -684,6 +703,43 @@ public:
                     return;
                 }
 
+                // [CRITICAL FIX 2] VERIFY ENTITY IS A VALID AVATAR / PLAYER
+                // Verified ARM64 logic from 0x100881cc0:
+                // Real players: ent_id > 0x40000000.
+                // Bots / AI players: ent_id <= 0x40000000 AND ENTITY_IS_AVATAR (0x152) != 0.
+                bool is_real_player = (uid > 0x40000000);
+                uint8_t is_av_flag = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IS_AVATAR);
+                bool is_avatar = is_real_player || (is_av_flag != 0);
+
+                // Also verify via EntityType* at entity + 0x10
+                uintptr_t type_ptr = MemoryEngine::Read<uintptr_t>(entity + NeoXOffsets::ENTITY_TYPE_PTR);
+                if (MemoryEngine::IsValidAddress(type_ptr)) {
+                    char type_name[16] = {0};
+                    uint8_t short_flag = MemoryEngine::Read<uint8_t>(type_ptr + 0x27);
+                    if ((short_flag & 0x80) == 0) {
+                        MemoryEngine::ReadBytes(type_ptr + 0x10, type_name, sizeof(type_name) - 1);
+                    } else {
+                        uintptr_t str_ptr = MemoryEngine::Read<uintptr_t>(type_ptr + 0x10);
+                        if (MemoryEngine::IsValidAddress(str_ptr)) {
+                            MemoryEngine::ReadBytes(str_ptr, type_name, sizeof(type_name) - 1);
+                        }
+                    }
+                    if (type_name[0] != '\0') {
+                        if (strcmp(type_name, "Avatar") != 0 &&
+                            strcmp(type_name, "NPCEntity") != 0 &&
+                            strcmp(type_name, "Monster") != 0) {
+                            return; // Not an avatar (weapon/drop/scene item rejected)
+                        }
+                        is_avatar = true;
+                    }
+                }
+
+                if (!is_avatar) return; // Completely ignore non-avatars
+
+                // [CRITICAL FIX 3] Active in world check (0x5D)
+                uint8_t in_world = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IN_WORLD);
+                if (in_world == 0) return;
+
                 Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
                 os_unfair_lock_lock(&s_PosCacheLock);
                 auto it_cache = s_CachedEntityPositions.find(ent_id);
@@ -693,7 +749,6 @@ public:
                 os_unfair_lock_unlock(&s_PosCacheLock);
 
                 if (pos.Length() >= 1.0f && std::abs(pos.x) < 25000.0f && std::abs(pos.z) < 25000.0f) {
-                    if (ent_id <= 0) return;
                     int raw_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
                     int raw_max_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
 
@@ -705,13 +760,17 @@ public:
                     p.max_health = (raw_max_hp > 0 && raw_max_hp <= 500) ? raw_max_hp : 100;
                     p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
                     p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
-                    p.is_bot = ((uint32_t)ent_id <= 0x40000000);
+                    p.is_bot = !is_real_player;
 
                     float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
                     p.distance = dist;
 
                     if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
-                        snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
+                        if (is_real_player) {
+                            snprintf(p.name, sizeof(p.name), "Player #%d", p.id & 0xFFFF);
+                        } else {
+                            snprintf(p.name, sizeof(p.name), "[BOT] #%d", p.id % 1000);
+                        }
 
                         // Build procedural humanoid skeleton based on position & stance
                         p.has_bones = true;
@@ -765,6 +824,9 @@ public:
         if (out_players.empty() && !snapshot_positions.empty()) {
             for (const auto& kv : snapshot_positions) {
                 if (kv.first == local_id) continue;
+                uint32_t uid = (uint32_t)kv.first;
+                if (uid >= 7000000 && uid < 8000000) continue; // Skip dropped weapons/items
+                if (uid >= 9000000 && uid < 9999999) continue; // Skip vehicles
                 if (kv.second.Length() < 1.0f) continue;
 
                 RosPlayer p{};
@@ -1181,37 +1243,21 @@ static void Apply5050SkillBlendAimbot(const Vector2& target_screen, const Vector
     s_ActiveAimCorrection = final_correction;
 
     if (fabsf(final_correction.x) > 0.05f || fabsf(final_correction.y) > 0.05f) {
-        float sens = 0.0020f;
-        if (s_ActiveCamera && MemoryEngine::IsValidAddress(s_ActiveCamera)) {
-            float cur_pitch = MemoryEngine::Read<float>(s_ActiveCamera + 0x20C);
-            float cur_yaw   = MemoryEngine::Read<float>(s_ActiveCamera + 0x210);
+        float sens = 0.0018f;
+        uintptr_t base = MemoryEngine::GetBaseAddress();
+        uintptr_t local_mgr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::LOCAL_PLAYER_MGR_PTR);
+        uintptr_t lp_entity = MemoryEngine::IsValidAddress(local_mgr) ? MemoryEngine::Read<uintptr_t>(local_mgr) : 0;
+        if (MemoryEngine::IsValidAddress(lp_entity)) {
+            float cur_yaw   = MemoryEngine::Read<float>(lp_entity + NeoXOffsets::ENTITY_YAW);
+            float cur_pitch = MemoryEngine::Read<float>(lp_entity + NeoXOffsets::ENTITY_PITCH);
 
             if (std::abs(cur_pitch) < 3.2f && std::abs(cur_yaw) < 100.0f) {
                 cur_yaw   += final_correction.x * sens;
                 cur_pitch -= final_correction.y * sens;
                 if (cur_pitch > 1.55f) cur_pitch = 1.55f;
                 if (cur_pitch < -1.55f) cur_pitch = -1.55f;
-                MemoryEngine::Write<float>(s_ActiveCamera + 0x20C, cur_pitch);
-                MemoryEngine::Write<float>(s_ActiveCamera + 0x210, cur_yaw);
-            }
-        } else {
-            uintptr_t client_app = s_CapturedEntityManager;
-            if (!MemoryEngine::IsValidAddress(client_app)) {
-                uintptr_t base = MemoryEngine::GetBaseAddress();
-                client_app = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CLIENTAPP_GLOBAL_PTR);
-            }
-            if (MemoryEngine::IsValidAddress(client_app)) {
-                uintptr_t camera_obj = MemoryEngine::Read<uintptr_t>(client_app + 0x2A0);
-                if (MemoryEngine::IsValidAddress(camera_obj)) {
-                    float cur_pitch = MemoryEngine::Read<float>(camera_obj + 0x20C);
-                    float cur_yaw   = MemoryEngine::Read<float>(camera_obj + 0x210);
-                    cur_yaw   += final_correction.x * sens;
-                    cur_pitch -= final_correction.y * sens;
-                    if (cur_pitch > 1.55f) cur_pitch = 1.55f;
-                    if (cur_pitch < -1.55f) cur_pitch = -1.55f;
-                    MemoryEngine::Write<float>(camera_obj + 0x20C, cur_pitch);
-                    MemoryEngine::Write<float>(camera_obj + 0x210, cur_yaw);
-                }
+                MemoryEngine::Write<float>(lp_entity + NeoXOffsets::ENTITY_YAW, cur_yaw);
+                MemoryEngine::Write<float>(lp_entity + NeoXOffsets::ENTITY_PITCH, cur_pitch);
             }
         }
     }

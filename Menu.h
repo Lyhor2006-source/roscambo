@@ -42,7 +42,7 @@ namespace Menu
         bool  aim360            = false;
         float aimStrength       = 50.0f;   // percent
         int   aimBone           = 0;       // 0 head, 1 neck, 2 chest, 3 pelvis
-        int   aimActivation     = AimAlways;
+        int   aimActivation     = AimScopeAndFiring;
         int   aimSnapMode       = 1;       // 0 = Custom Smooth, 1 = 50/50 Skill Blend, 2 = Rage Snap
         float aimSkillRatio     = 0.50f;
         float aimFov            = 90.0f;   // pixels

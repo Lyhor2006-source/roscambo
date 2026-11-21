@@ -115,6 +115,7 @@ namespace NeoXOffsets {
     constexpr uintptr_t HASH_NODE_VALUE            = 0x18;      // ldr x0,  [x11, #0x18] (Entity* Pointer)
 
     // Entity Object offsets (VERIFIED ARM64):
+    constexpr uintptr_t ENTITY_TYPE_PTR            = 0x10;      // EntityType* pointer (holds std::string type_name at +0x10)
     constexpr uintptr_t ENTITY_ID                  = 0x18;      // int32 entity_id (0x10087f954)
     constexpr uintptr_t ENTITY_COORDS              = 0x1C;      // Vector3 world position (x@0x1c, y@0x20, z@0x24) (0x10087fad0)
     constexpr uintptr_t ENTITY_DIRECTION           = 0x28;      // Vector3 direction
