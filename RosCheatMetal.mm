@@ -259,7 +259,7 @@ static void Hooked_onEntityMove(uintptr_t this_ptr, int entity_id, uintptr_t a3,
         s_CapturedEntityManager = this_ptr;
     }
     if (pos_ptr && MemoryEngine::IsValidAddress((uintptr_t)pos_ptr)) {
-        Vector3 p = MemoryEngine::Read<Vector3>((uintptr_t)pos_ptr);
+        Vector3 p = *pos_ptr; // Zero-overhead direct read in-process
         if (p.Length() > 1.0f && std::abs(p.x) < 20000.0f && std::abs(p.y) < 20000.0f && std::abs(p.z) < 20000.0f) {
             s_CachedEntityPositions[entity_id] = { p, s_FrameCount };
         }
@@ -301,6 +301,9 @@ static uintptr_t Hooked_getEntity(uintptr_t this_ptr, int id) {
 }
 
 static void InstallVTableHooks() {
+    static bool s_Hooked = false;
+    if (s_Hooked) return;
+
     uintptr_t base = MemoryEngine::GetBaseAddress();
     if (!base) return;
 
@@ -336,6 +339,8 @@ static void InstallVTableHooks() {
         s_OrigGetEntity = (getEntity_t)fn_get;
         *(uintptr_t*)slot_get = (uintptr_t)&Hooked_getEntity;
     }
+
+    s_Hooked = true;
 }
 
 // Direct Heap Scanner for ClientApp instance (matches vtable base + 0x33D8D98 and base + 0x33D8E80)
@@ -502,8 +507,8 @@ public:
             }
         }
 
-        // Priority 4: Heap scan for Camera vtable (base + 0x341C308)
-        if (!ProjectionEngine::IsValidViewProjMatrix(out_vp) && (s_FrameCount % 60 == 1 || s_ActiveCamera == 0)) {
+        // Priority 4: Heap scan for Camera vtable (base + 0x341C308) - throttled to once every 180 frames (3s)
+        if (!ProjectionEngine::IsValidViewProjMatrix(out_vp) && (s_FrameCount % 180 == 1)) {
             uintptr_t found_cam = ScanHeapForCamera(base);
             if (found_cam) {
                 s_ActiveCamera = found_cam;
@@ -521,7 +526,7 @@ public:
                     s_CapturedEntityManager = global_app;
                 }
             }
-            if (!s_CapturedEntityManager && s_FrameCount % 60 == 1) {
+            if (!s_CapturedEntityManager && (s_FrameCount % 180 == 1)) {
                 uintptr_t found = ScanHeapForClientApp(base);
                 if (found) {
                     s_CapturedEntityManager = found;
@@ -566,17 +571,12 @@ public:
             out_local_pos = s_CachedEntityPositions[local_id].pos;
         }
 
-        // 4. Extract Entities from ClientApp (All 3 Hash Tables: 0xF80, 0xFA8, 0xFD0 & Buckets)
+        // 4. Extract Entities from ClientApp (All 3 Hash Tables: 0xF80, 0xFA8, 0xFD0)
         if (MemoryEngine::IsValidAddress(client_app)) {
             uintptr_t heads[] = {
                 MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_FIRST_NODE),
                 MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_SECOND_NODE),
                 MemoryEngine::Read<uintptr_t>(client_app + NeoXOffsets::CLIENTAPP_THIRD_NODE)
-            };
-            uintptr_t bucket_ptrs[] = {
-                client_app + 0xF70,
-                client_app + 0xF98,
-                client_app + 0xFC0
             };
             std::unordered_set<uintptr_t> visited_entities;
 
@@ -650,36 +650,15 @@ public:
                 }
             };
 
-            // 1. Traverse linked list heads
+            // 1. Traverse linked list heads (Contains all active entities with 0-overhead)
             for (uintptr_t head : heads) {
                 uintptr_t node = head;
                 int safety = 0;
-                while (MemoryEngine::IsValidAddress(node) && ++safety < 1500) {
+                while (MemoryEngine::IsValidAddress(node) && ++safety < 500) {
                     int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
                     uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
                     process_entity_fn(entity, ent_id);
                     node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
-                }
-            }
-
-            // 2. Scan buckets for any unlinked or bucket-isolated entities
-            for (uintptr_t b_ptr : bucket_ptrs) {
-                uintptr_t bucket_arr = MemoryEngine::Read<uintptr_t>(b_ptr);
-                size_t bucket_cnt = MemoryEngine::Read<size_t>(b_ptr + 0x08);
-                if (MemoryEngine::IsValidAddress(bucket_arr) && bucket_cnt > 0 && bucket_cnt < 8192) {
-                    for (size_t b = 0; b < bucket_cnt; ++b) {
-                        uintptr_t bucket_node_ptr = MemoryEngine::Read<uintptr_t>(bucket_arr + b * sizeof(uintptr_t));
-                        if (MemoryEngine::IsValidAddress(bucket_node_ptr)) {
-                            uintptr_t node = MemoryEngine::Read<uintptr_t>(bucket_node_ptr);
-                            int safety = 0;
-                            while (MemoryEngine::IsValidAddress(node) && ++safety < 100) {
-                                int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
-                                uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
-                                process_entity_fn(entity, ent_id);
-                                node = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_NEXT);
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -733,133 +712,140 @@ public:
 // =============================================================================
 // GAMEPLAY DEBUG SCANNER & USB LOGGER (Writes to Documents/debug.txt & NSLog)
 // =============================================================================
-static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const Vector3& local_pos, int local_team, const Matrix4x4& vp, float camera_yaw, CGSize screenSize) {
-    @autoreleasepool {
-        NSMutableString* log = [NSMutableString string];
-        NSDateFormatter* df = [[NSDateFormatter alloc] init];
-        [df setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
-        NSString* timeStr = [df stringFromDate:[NSDate date]];
+static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const Vector3& local_pos, int local_team, const Matrix4x4& vp, float camera_yaw, CGSize screenSize, bool is_manual_dump = false) {
+    // Copy data to background worker queue so Metal rendering never drops a single frame
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        @autoreleasepool {
+            NSMutableString* log = [NSMutableString string];
+            NSDateFormatter* df = [[NSDateFormatter alloc] init];
+            [df setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
+            NSString* timeStr = [df stringFromDate:[NSDate date]];
 
-        [log appendFormat:@"==================================================\n"];
-        [log appendFormat:@"[ROSCAMBO ECLIPSE DEBUG SCAN REPORT]\n"];
-        [log appendFormat:@"Timestamp: %@\n", timeStr];
-        [log appendFormat:@"Frame: %llu\n", s_FrameCount];
-        [log appendFormat:@"Screen: %.0f x %.0f (Center: %.1f, %.1f)\n", screenSize.width, screenSize.height, screenSize.width * 0.5f, screenSize.height * 0.5f];
-        
-        uintptr_t base = MemoryEngine::GetBaseAddress();
-        [log appendFormat:@"\n--- MEMORY & BASE ---\n"];
-        [log appendFormat:@"Mach-O Base: 0x%lx\n", base];
-        [log appendFormat:@"ClientApp Ptr: 0x%lx (Valid: %d)\n", s_CapturedEntityManager, MemoryEngine::IsValidAddress(s_CapturedEntityManager) ? 1 : 0];
-        
-        if (MemoryEngine::IsValidAddress(s_CapturedEntityManager)) {
-            uintptr_t vtable = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager);
-            [log appendFormat:@"ClientApp VTable: 0x%lx\n", vtable];
+            [log appendFormat:@"==================================================\n"];
+            [log appendFormat:@"[ROSCAMBO ECLIPSE DEBUG SCAN REPORT]\n"];
+            [log appendFormat:@"Timestamp: %@\n", timeStr];
+            [log appendFormat:@"Frame: %llu\n", s_FrameCount];
+            [log appendFormat:@"Screen: %.0f x %.0f (Center: %.1f, %.1f)\n", screenSize.width, screenSize.height, screenSize.width * 0.5f, screenSize.height * 0.5f];
             
-            // Map 1 (0xF70)
-            size_t map1_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xF78);
-            uintptr_t map1_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xF80);
-            [log appendFormat:@"Table 1 (0xF70): cnt=%zu, head=0x%lx\n", map1_cnt, map1_head];
+            uintptr_t base = MemoryEngine::GetBaseAddress();
+            [log appendFormat:@"\n--- MEMORY & BASE ---\n"];
+            [log appendFormat:@"Mach-O Base: 0x%lx\n", base];
+            [log appendFormat:@"ClientApp Ptr: 0x%lx (Valid: %d)\n", s_CapturedEntityManager, MemoryEngine::IsValidAddress(s_CapturedEntityManager) ? 1 : 0];
             
-            // Map 2 (0xF98) - Avatars
-            size_t map2_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xFA0);
-            uintptr_t map2_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xFA8);
-            [log appendFormat:@"Table 2 [Players] (0xF98): cnt=%zu, head=0x%lx\n", map2_cnt, map2_head];
-            
-            // Map 3 (0xFC0) - Props/Vehicles
-            size_t map3_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xFC8);
-            uintptr_t map3_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xFD0);
-            [log appendFormat:@"Table 3 (0xFC0): cnt=%zu, head=0x%lx\n", map3_cnt, map3_head];
-        }
+            if (MemoryEngine::IsValidAddress(s_CapturedEntityManager)) {
+                uintptr_t vtable = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager);
+                [log appendFormat:@"ClientApp VTable: 0x%lx\n", vtable];
+                
+                // Map 1 (0xF70)
+                size_t map1_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xF78);
+                uintptr_t map1_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xF80);
+                [log appendFormat:@"Table 1 (0xF70): cnt=%zu, head=0x%lx\n", map1_cnt, map1_head];
+                
+                // Map 2 (0xF98) - Avatars
+                size_t map2_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xFA0);
+                uintptr_t map2_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xFA8);
+                [log appendFormat:@"Table 2 [Players] (0xF98): cnt=%zu, head=0x%lx\n", map2_cnt, map2_head];
+                
+                // Map 3 (0xFC0) - Props/Vehicles
+                size_t map3_cnt = MemoryEngine::Read<size_t>(s_CapturedEntityManager + 0xFC8);
+                uintptr_t map3_head = MemoryEngine::Read<uintptr_t>(s_CapturedEntityManager + 0xFD0);
+                [log appendFormat:@"Table 3 (0xFC0): cnt=%zu, head=0x%lx\n", map3_cnt, map3_head];
+            }
 
-        [log appendFormat:@"\n--- CAMERA & PROJECTION ---\n"];
-        uint16_t cam_flag = s_ActiveCamera ? MemoryEngine::Read<uint16_t>(s_ActiveCamera + NeoXOffsets::CAMERA_FLAG) : 0;
-        uintptr_t cam_vt = s_ActiveCamera ? MemoryEngine::Read<uintptr_t>(s_ActiveCamera) : 0;
-        [log appendFormat:@"Active Camera: 0x%lx (Flag: %u, VTable: 0x%lx)\n", s_ActiveCamera, cam_flag, cam_vt];
-        [log appendFormat:@"Camera Yaw: %.4f rad (%.1f deg)\n", camera_yaw, camera_yaw * 57.2958f];
-        bool vp_valid = ProjectionEngine::IsValidViewProjMatrix(vp);
-        [log appendFormat:@"VP Valid: %d\n", vp_valid ? 1 : 0];
-        [log appendFormat:@"VP Matrix:\n"];
-        [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[0][0], vp.m[0][1], vp.m[0][2], vp.m[0][3]];
-        [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[1][0], vp.m[1][1], vp.m[1][2], vp.m[1][3]];
-        [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[2][0], vp.m[2][1], vp.m[2][2], vp.m[2][3]];
-        [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[3][0], vp.m[3][1], vp.m[3][2], vp.m[3][3]];
+            [log appendFormat:@"\n--- CAMERA & PROJECTION ---\n"];
+            uint16_t cam_flag = s_ActiveCamera ? MemoryEngine::Read<uint16_t>(s_ActiveCamera + NeoXOffsets::CAMERA_FLAG) : 0;
+            uintptr_t cam_vt = s_ActiveCamera ? MemoryEngine::Read<uintptr_t>(s_ActiveCamera) : 0;
+            [log appendFormat:@"Active Camera: 0x%lx (Flag: %u, VTable: 0x%lx)\n", s_ActiveCamera, cam_flag, cam_vt];
+            [log appendFormat:@"Camera Yaw: %.4f rad (%.1f deg)\n", camera_yaw, camera_yaw * 57.2958f];
+            bool vp_valid = ProjectionEngine::IsValidViewProjMatrix(vp);
+            [log appendFormat:@"VP Valid: %d\n", vp_valid ? 1 : 0];
+            [log appendFormat:@"VP Matrix:\n"];
+            [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[0][0], vp.m[0][1], vp.m[0][2], vp.m[0][3]];
+            [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[1][0], vp.m[1][1], vp.m[1][2], vp.m[1][3]];
+            [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[2][0], vp.m[2][1], vp.m[2][2], vp.m[2][3]];
+            [log appendFormat:@"  [ %8.4f, %8.4f, %8.4f, %8.4f ]\n", vp.m[3][0], vp.m[3][1], vp.m[3][2], vp.m[3][3]];
 
-        [log appendFormat:@"\n--- LOCAL PLAYER ---\n"];
-        [log appendFormat:@"Local ID: %d | Team: %d\n", s_CapturedLocalId, local_team];
-        [log appendFormat:@"Local Pos: X=%.2f, Y=%.2f, Z=%.2f (Len=%.2f)\n", local_pos.x, local_pos.y, local_pos.z, local_pos.Length()];
+            [log appendFormat:@"\n--- LOCAL PLAYER ---\n"];
+            [log appendFormat:@"Local ID: %d | Team: %d\n", s_CapturedLocalId, local_team];
+            [log appendFormat:@"Local Pos: X=%.2f, Y=%.2f, Z=%.2f (Len=%.2f)\n", local_pos.x, local_pos.y, local_pos.z, local_pos.Length()];
 
-        [log appendFormat:@"\n--- HOOKS & TELEMETRY ---\n"];
-        [log appendFormat:@"onEntityMove Hits: %llu\n", s_MoveHookHits];
-        [log appendFormat:@"onBasePlayerCreate Hits: %llu\n", s_CreateHookHits];
-        [log appendFormat:@"spaceData Hits: %llu\n", s_SpaceDataHits];
-        [log appendFormat:@"Cached Positions Count: %zu\n", s_CachedEntityPositions.size()];
+            [log appendFormat:@"\n--- HOOKS & TELEMETRY ---\n"];
+            [log appendFormat:@"onEntityMove Hits: %llu\n", s_MoveHookHits];
+            [log appendFormat:@"onBasePlayerCreate Hits: %llu\n", s_CreateHookHits];
+            [log appendFormat:@"spaceData Hits: %llu\n", s_SpaceDataHits];
+            [log appendFormat:@"Cached Positions Count: %zu\n", s_CachedEntityPositions.size()];
 
-        [log appendFormat:@"\n--- PLAYERS / ENTITIES DETECTED (%zu) ---\n", players.size()];
-        size_t idx = 0;
-        for (const auto& p : players) {
-            Vector2 screen_head, screen_feet;
-            bool w2s_head = ProjectionEngine::WorldToScreen(p.head_pos, screen_head, vp, screenSize.width, screenSize.height);
-            bool w2s_feet = ProjectionEngine::WorldToScreen(p.position, screen_feet, vp, screenSize.width, screenSize.height);
+            [log appendFormat:@"\n--- PLAYERS / ENTITIES DETECTED (%zu) ---\n", players.size()];
+            size_t idx = 0;
+            for (const auto& p : players) {
+                Vector2 screen_head, screen_feet;
+                bool w2s_head = ProjectionEngine::WorldToScreen(p.head_pos, screen_head, vp, screenSize.width, screenSize.height);
+                bool w2s_feet = ProjectionEngine::WorldToScreen(p.position, screen_feet, vp, screenSize.width, screenSize.height);
 
-            [log appendFormat:@"[%02zu] ID:%d | Inst:0x%lx | Bot:%d | HP:%d/%d | Dist:%.1fm\n",
-             idx++, p.id, p.instance, p.is_bot ? 1 : 0, p.health, p.max_health, p.distance];
-            [log appendFormat:@"     World Pos: (%.2f, %.2f, %.2f) | Head: (%.2f, %.2f, %.2f)\n",
-             p.position.x, p.position.y, p.position.z, p.head_pos.x, p.head_pos.y, p.head_pos.z];
-            [log appendFormat:@"     W2S Head: vis=%d, pos=(%.1f, %.1f) | Feet: vis=%d, pos=(%.1f, %.1f)\n",
-             w2s_head ? 1 : 0, screen_head.x, screen_head.y, w2s_feet ? 1 : 0, screen_feet.x, screen_feet.y];
-            if (idx >= 60) {
-                [log appendFormat:@"     ... and %zu more entities truncated\n", players.size() - idx];
-                break;
+                [log appendFormat:@"[%02zu] ID:%d | Inst:0x%lx | Bot:%d | HP:%d/%d | Dist:%.1fm\n",
+                 idx++, p.id, p.instance, p.is_bot ? 1 : 0, p.health, p.max_health, p.distance];
+                [log appendFormat:@"     World Pos: (%.2f, %.2f, %.2f) | Head: (%.2f, %.2f, %.2f)\n",
+                 p.position.x, p.position.y, p.position.z, p.head_pos.x, p.head_pos.y, p.head_pos.z];
+                [log appendFormat:@"     W2S Head: vis=%d, pos=(%.1f, %.1f) | Feet: vis=%d, pos=(%.1f, %.1f)\n",
+                 w2s_head ? 1 : 0, screen_head.x, screen_head.y, w2s_feet ? 1 : 0, screen_feet.x, screen_feet.y];
+                if (idx >= 60) {
+                    [log appendFormat:@"     ... and %zu more entities truncated\n", players.size() - idx];
+                    break;
+                }
+            }
+            [log appendFormat:@"==================================================\n\n"];
+
+            // 1. Write to Documents/debug.txt
+            NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+            if (paths.count > 0) {
+                NSString* docDir = [paths firstObject];
+                NSString* filePath = [docDir stringByAppendingPathComponent:@"debug.txt"];
+                NSError* err = nil;
+                [log writeToFile:filePath atomically:NO encoding:NSUTF8StringEncoding error:&err];
+                if (err) {
+                    NSLog(@"[RosCambo-DEBUG] Failed to write debug.txt: %@", err);
+                }
+            }
+
+            // 2. Copy to iOS System Clipboard (only on manual dump to prevent UI freeze)
+            if (is_manual_dump) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [UIPasteboard generalPasteboard].string = log;
+                });
+            }
+
+            // 3. Stream compact summary to USB syslog (NSLog)
+            NSLog(@"[RosCambo-DEBUG] F:%llu | App:0x%lx | Cam:0x%lx | VP_Valid:%d | LP:(%.1f,%.1f,%.1f) | Ents:%zu | MoveHits:%llu",
+                  s_FrameCount, s_CapturedEntityManager, s_ActiveCamera, vp_valid ? 1 : 0,
+                  local_pos.x, local_pos.y, local_pos.z, players.size(), s_MoveHookHits);
+
+            // 4. Auto-Push to PC Debug Server over Wi-Fi
+            Menu::Config& cfg = Menu::Cfg();
+            if (cfg.autoSendToPc && cfg.serverIp[0] != '\0') {
+                NSString* hostStr = [NSString stringWithUTF8String:cfg.serverIp];
+                NSString* urlStr = [NSString stringWithFormat:@"http://%@/debug", hostStr];
+                NSURL* targetUrl = [NSURL URLWithString:urlStr];
+                if (targetUrl) {
+                    NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:targetUrl
+                                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                                   timeoutInterval:2.0];
+                    [req setHTTPMethod:@"POST"];
+                    [req setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+                    [req setHTTPBody:[log dataUsingEncoding:NSUTF8StringEncoding]];
+
+                    NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+                        completionHandler:^(NSData* _Nullable d, NSURLResponse* _Nullable r, NSError* _Nullable err) {
+                            if (!err) {
+                                NSLog(@"[RosCambo-DEBUG] Successfully pushed report to PC (%@)", hostStr);
+                            } else {
+                                NSLog(@"[RosCambo-DEBUG] Push to PC error: %@", err.localizedDescription);
+                            }
+                        }];
+                    [task resume];
+                }
             }
         }
-        [log appendFormat:@"==================================================\n\n"];
-
-        // 1. Write to Documents/debug.txt
-        NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        if (paths.count > 0) {
-            NSString* docDir = [paths firstObject];
-            NSString* filePath = [docDir stringByAppendingPathComponent:@"debug.txt"];
-            NSError* err = nil;
-            [log writeToFile:filePath atomically:NO encoding:NSUTF8StringEncoding error:&err];
-            if (err) {
-                NSLog(@"[RosCambo-DEBUG] Failed to write debug.txt: %@", err);
-            }
-        }
-
-        // 2. Copy to iOS System Clipboard (can paste anywhere)
-        [UIPasteboard generalPasteboard].string = log;
-
-        // 3. Stream compact summary to USB syslog (NSLog)
-        NSLog(@"[RosCambo-DEBUG] F:%llu | App:0x%lx | Cam:0x%lx | VP_Valid:%d | LP:(%.1f,%.1f,%.1f) | Ents:%zu | MoveHits:%llu",
-              s_FrameCount, s_CapturedEntityManager, s_ActiveCamera, vp_valid ? 1 : 0,
-              local_pos.x, local_pos.y, local_pos.z, players.size(), s_MoveHookHits);
-
-        // 4. Auto-Push to PC Debug Server over Wi-Fi
-        Menu::Config& cfg = Menu::Cfg();
-        if (cfg.autoSendToPc && cfg.serverIp[0] != '\0') {
-            NSString* hostStr = [NSString stringWithUTF8String:cfg.serverIp];
-            NSString* urlStr = [NSString stringWithFormat:@"http://%@/debug", hostStr];
-            NSURL* targetUrl = [NSURL URLWithString:urlStr];
-            if (targetUrl) {
-                NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:targetUrl
-                                                                   cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                               timeoutInterval:2.0];
-                [req setHTTPMethod:@"POST"];
-                [req setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
-                [req setHTTPBody:[log dataUsingEncoding:NSUTF8StringEncoding]];
-
-                NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
-                    completionHandler:^(NSData* _Nullable d, NSURLResponse* _Nullable r, NSError* _Nullable err) {
-                        if (!err) {
-                            NSLog(@"[RosCambo-DEBUG] Successfully pushed report to PC (%@)", hostStr);
-                        } else {
-                            NSLog(@"[RosCambo-DEBUG] Push to PC error: %@", err.localizedDescription);
-                        }
-                    }];
-                [task resume];
-            }
-        }
-    }
+    });
 }
 
 // =============================================================================
@@ -1100,12 +1086,11 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 
     // Periodic & On-Demand Debug State Dump (to Documents/debug.txt & USB NSLog)
     static uint64_t s_LastDebugDumpFrame = 0;
-    if (cfg.debugScanToFile) {
-        if (g_TriggerDebugDump || (s_FrameCount - s_LastDebugDumpFrame >= 120)) {
-            s_LastDebugDumpFrame = s_FrameCount;
-            g_TriggerDebugDump = false;
-            DumpGameplayDebugToFile(players, local_pos, local_team, vp_matrix, camera_yaw, screenSize);
-        }
+    if (g_TriggerDebugDump || (cfg.debugScanToFile && (s_FrameCount - s_LastDebugDumpFrame >= 300))) {
+        s_LastDebugDumpFrame = s_FrameCount;
+        bool is_manual = g_TriggerDebugDump;
+        g_TriggerDebugDump = false;
+        DumpGameplayDebugToFile(players, local_pos, local_team, vp_matrix, camera_yaw, screenSize, is_manual);
     }
 
     Vector2 center(screenSize.width * 0.5f, screenSize.height * 0.5f);
