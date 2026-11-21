@@ -359,7 +359,7 @@ static void InitializeMetalOverlay(id<MTLDevice> device) {
     io.IniFilename = nullptr; // Stateless configuration
     io.MouseDrawCursor = false;
 
-    ApplyRulesOfSurvivalDarkTheme();
+    ApplyWizardIOSTheme();
     ImGui_ImplMetal_Init(device);
     LoadAvatarTexture(device);
 
@@ -974,7 +974,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     if (objc_getAssociatedObject(window, &kGestureAssociatedKey)) return;
     objc_setAssociatedObject(window, &kGestureAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    UITapGestureRecognizer* tripleTap = [[UITapGestureRecognizer alloc] initWithTarget:self selector:@selector(onTripleTap:)];
+    UITapGestureRecognizer* tripleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTripleTap:)];
     tripleTap.numberOfTouchesRequired = 3;
     tripleTap.cancelsTouchesInView = NO;
     [window addGestureRecognizer:tripleTap];
