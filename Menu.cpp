@@ -89,32 +89,33 @@ namespace Menu
     static bool ToggleSwitch(const char* label, bool* v)
     {
         ImGui::PushID(label);
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        ImDrawList* draw = ImGui::GetWindowDrawList();
 
         float avail_w = ImGui::GetContentRegionAvail().x;
         float height = 24.0f * g_scale;
         float width = 46.0f * g_scale;
         float radius = height * 0.5f;
+        float switch_x = ImGui::GetCursorPosX() + avail_w - width;
 
         // Label on left
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(label);
 
-        // Switch button on far right
-        ImVec2 btn_pos = ImVec2(p.x + avail_w - width, p.y + 2.0f);
-        ImGui::SetCursorScreenPos(btn_pos);
+        // Switch button on far right (placed cleanly on the same line)
+        ImGui::SameLine(switch_x);
         bool clicked = ImGui::InvisibleButton("##btn", ImVec2(width, height));
         if (clicked) *v = !(*v);
 
+        ImVec2 btn_pos = ImGui::GetItemRectMin();
         float t = *v ? 1.0f : 0.0f;
         ImU32 col_bg = *v ? IM_COL32(0, 180, 245, 255) : IM_COL32(35, 45, 62, 255);
 
+        ImDrawList* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(btn_pos, ImVec2(btn_pos.x + width, btn_pos.y + height), col_bg, radius);
         float circle_x = btn_pos.x + radius + t * (width - 2.0f * radius);
         draw->AddCircleFilled(ImVec2(circle_x, btn_pos.y + radius), radius - 2.5f, IM_COL32(255, 255, 255, 255));
 
-        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + height + 6.0f));
+        // Submit spacing item properly to advance layout without triggering IsSetPos boundary error
+        ImGui::Dummy(ImVec2(0.0f, 3.0f * g_scale));
         ImGui::PopID();
         return clicked;
     }

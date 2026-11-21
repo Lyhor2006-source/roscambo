@@ -20,6 +20,12 @@
 // Safe IM_ASSERT handler to prevent assertion aborts (__assert_rtn / SIGABRT) in production iOS builds
 #define IM_ASSERT(_EXPR)  ((void)(_EXPR))
 
+// Suppress Dear ImGui user error tooltips / popups in production builds
+#define IM_ASSERT_USER_ERROR(_EXPR,_MSG)            ((void)0)
+#define IM_ASSERT_USER_ERROR_RET(_EXPR,_MSG)        do { if (!(_EXPR)) return; } while (0)
+#define IM_ASSERT_USER_ERROR_RETV(_EXPR,_RETV,_MSG) do { if (!(_EXPR)) return _RETV; } while (0)
+
+
 
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.
