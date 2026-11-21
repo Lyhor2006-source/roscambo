@@ -322,46 +322,10 @@ static uintptr_t Hooked_getEntity(uintptr_t this_ptr, int id) {
 }
 
 static void InstallVTableHooks() {
-    static bool s_Hooked = false;
-    if (s_Hooked) return;
-
-    uintptr_t base = MemoryEngine::GetBaseAddress();
-    if (!base) return;
-
-    uintptr_t slot_create = base + 0x33D8D98;
-    uintptr_t slot_get    = base + 0x33D8DA8;
-    uintptr_t slot_move   = base + 0x33D8DE8;
-    uintptr_t slot_space  = base + 0x33D8DF8;
-
-    vm_address_t page = slot_create & ~0x3FFFULL;
-    vm_protect(mach_task_self(), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_WRITE);
-
-    // Direct memory read/write for in-process vtable hooking
-    uintptr_t fn_move = *(uintptr_t*)slot_move;
-    if (fn_move != 0 && fn_move != (uintptr_t)&Hooked_onEntityMove) {
-        s_OrigOnEntityMove = (onEntityMove_t)fn_move;
-        *(uintptr_t*)slot_move = (uintptr_t)&Hooked_onEntityMove;
-    }
-
-    uintptr_t fn_create = *(uintptr_t*)slot_create;
-    if (fn_create != 0 && fn_create != (uintptr_t)&Hooked_onBasePlayerCreate) {
-        s_OrigOnBasePlayerCreate = (onBasePlayerCreate_t)fn_create;
-        *(uintptr_t*)slot_create = (uintptr_t)&Hooked_onBasePlayerCreate;
-    }
-
-    uintptr_t fn_space = *(uintptr_t*)slot_space;
-    if (fn_space != 0 && fn_space != (uintptr_t)&Hooked_spaceData) {
-        s_OrigSpaceData = (spaceData_t)fn_space;
-        *(uintptr_t*)slot_space = (uintptr_t)&Hooked_spaceData;
-    }
-
-    uintptr_t fn_get = *(uintptr_t*)slot_get;
-    if (fn_get != 0 && fn_get != (uintptr_t)&Hooked_getEntity) {
-        s_OrigGetEntity = (getEntity_t)fn_get;
-        *(uintptr_t*)slot_get = (uintptr_t)&Hooked_getEntity;
-    }
-
-    s_Hooked = true;
+    // VTable hooking is intentionally disabled.
+    // In-game entity movement (0x10087afc4) passes coordinates via ARM64 SIMD registers (v0-v2),
+    // which get clobbered by standard C++ function hooks, causing fatal crashes upon match join.
+    // All entities, local player, and 3D positions are safely read directly via ClientApp hash tables.
 }
 
 // Direct Heap Scanner for ClientApp instance (matches vtable base + 0x33D8D98 and base + 0x33D8E80)
@@ -764,7 +728,7 @@ public:
                     p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
                     p.distance = dist;
 
-                    // Resolve Player Name (cached by ent_id to maintain buttery 60 FPS without Python overhead)
+                    // Resolve Player / Bot Label (Zero-overhead, 100% crash-free out-of-process classification)
                     static std::unordered_map<int, std::pair<std::string, bool>> s_NameCache;
                     if (s_FrameCount % 1800 == 0 && s_NameCache.size() > 400) s_NameCache.clear();
 
@@ -773,38 +737,10 @@ public:
                         snprintf(p.name, sizeof(p.name), "%s", it_name->second.first.c_str());
                         p.is_bot = it_name->second.second;
                     } else {
-                        char name_buf[64] = {0};
-                        static uintptr_t s_PyGetAttr = 0;
-                        if (!s_PyGetAttr) {
-                            s_PyGetAttr = MemoryEngine::GetBaseAddress() + 0x1c7b5f4;
-                        }
-                        typedef uintptr_t (*PyGetAttrFn)(uintptr_t, const char*);
-                        PyGetAttrFn py_get = (PyGetAttrFn)s_PyGetAttr;
-                        if (py_get) {
-                            const char* try_props[] = { "nickname", "role_name", "name" };
-                            for (const char* prop : try_props) {
-                                uintptr_t py_str = py_get(entity, prop);
-                                if (MemoryEngine::IsValidAddress(py_str)) {
-                                    char temp[64] = {0};
-                                    MemoryEngine::ReadBytes(py_str + 0x20, temp, sizeof(temp) - 1);
-                                    if (temp[0] >= 32 && temp[0] <= 126) {
-                                        strncpy(name_buf, temp, sizeof(name_buf) - 1);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if (name_buf[0] != '\0') {
-                            bool is_bot = (strstr(name_buf, "Bot") != nullptr ||
-                                           strstr(name_buf, "bot") != nullptr ||
-                                           strstr(name_buf, "Patrol") != nullptr);
-                            p.is_bot = is_bot;
-                            snprintf(p.name, sizeof(p.name), "%s", name_buf);
-                        } else {
-                            p.is_bot = false;
-                            snprintf(p.name, sizeof(p.name), "Player #%d", ent_id % 10000);
-                        }
+                        // In RoS, bot entity IDs have a distinct low/high range, while remote players have standard ID ranges
+                        bool is_bot = (uid < 1000000 || uid >= 50000000);
+                        p.is_bot = is_bot;
+                        snprintf(p.name, sizeof(p.name), "%s #%u", is_bot ? "Bot" : "Player", uid % 10000);
                         s_NameCache[ent_id] = { p.name, p.is_bot };
                     }
 
