@@ -88,12 +88,14 @@ namespace NeoXOffsets {
     // Entity Object offsets (VERIFIED ARM64):
     constexpr uintptr_t ENTITY_ID                  = 0x18;      // int32 entity_id
     constexpr uintptr_t ENTITY_COORDS              = 0x1C;      // Vector3 world position (x@0x1c, y@0x20, z@0x24)
+    constexpr uintptr_t ENTITY_SPACE_ID            = 0x54;      // int32 space_id
+    constexpr uintptr_t ENTITY_IS_ACTIVE           = 0x5E;      // uint8_t is_active / visible
+    constexpr uintptr_t ENTITY_IS_AVATAR           = 0x152;     // uint8_t is_avatar / player flag (from 0x100881cc0)
     constexpr uintptr_t ENTITY_HP                  = 0x1B8;     // int32 health
     constexpr uintptr_t ENTITY_MAX_HP              = 0x1BC;     // int32 max health
     constexpr uintptr_t ENTITY_TEAM                = 0x1C4;     // int32 team
     constexpr uintptr_t ENTITY_STANCE              = 0x1C8;     // int32 stance (0=stand, 1=crouch, 2=prone)
     constexpr uintptr_t ENTITY_IS_BOT              = 0x1D0;     // bool is_bot
-    constexpr uintptr_t ENTITY_PLAYER_MODEL        = 0x228;     // Player model pointer (non-null for players)
     constexpr uintptr_t SKELETAL_BONE_ARRAY        = 0x48;      // Bone transform array
 }
 

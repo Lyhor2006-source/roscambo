@@ -429,16 +429,46 @@ public:
             if (MemoryEngine::IsValidAddress(scene_ptr)) {
                 uintptr_t cam_begin = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_BEGIN);
                 uintptr_t cam_end = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_END);
+                bool found_3d_cam = false;
+
                 if (MemoryEngine::IsValidAddress(cam_begin) && cam_end > cam_begin && (cam_end - cam_begin) <= 32 * sizeof(uintptr_t)) {
                     size_t cam_count = (cam_end - cam_begin) / sizeof(uintptr_t);
+                    // Pass 1: Prioritize 3D camera (flag != 1, e.g. USER1)
                     for (size_t c = 0; c < cam_count; ++c) {
                         uintptr_t cam = MemoryEngine::Read<uintptr_t>(cam_begin + (c * sizeof(uintptr_t)));
                         if (MemoryEngine::IsValidAddress(cam)) {
                             uint16_t flag = MemoryEngine::Read<uint16_t>(cam + NeoXOffsets::CAMERA_FLAG);
-                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
+                            if (flag != 1) {
+                                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
+                                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                    out_vp = cam_vp;
+                                    found_3d_cam = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Pass 2: Check default camera at scene + 0x238 if 3D user camera not found
+                    if (!found_3d_cam) {
+                        uintptr_t def_cam = MemoryEngine::Read<uintptr_t>(scene_ptr + 0x238);
+                        if (MemoryEngine::IsValidAddress(def_cam)) {
+                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(def_cam + NeoXOffsets::CAMERA_VIEW_PROJ);
                             if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
                                 out_vp = cam_vp;
-                                if (flag != 1) { // 3D User camera
+                                found_3d_cam = true;
+                            }
+                        }
+                    }
+
+                    // Pass 3: Any valid camera in _cameras
+                    if (!found_3d_cam) {
+                        for (size_t c = 0; c < cam_count; ++c) {
+                            uintptr_t cam = MemoryEngine::Read<uintptr_t>(cam_begin + (c * sizeof(uintptr_t)));
+                            if (MemoryEngine::IsValidAddress(cam)) {
+                                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
+                                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                    out_vp = cam_vp;
                                     break;
                                 }
                             }
@@ -505,47 +535,40 @@ public:
                         int ent_id = MemoryEngine::Read<int>(node + NeoXOffsets::HASH_NODE_KEY);
                         uintptr_t entity = MemoryEngine::Read<uintptr_t>(node + NeoXOffsets::HASH_NODE_VALUE);
                         if (MemoryEngine::IsValidAddress(entity) && entity != local_player_entity && ent_id != local_id) {
-                            uintptr_t player_model = MemoryEngine::Read<uintptr_t>(entity + NeoXOffsets::ENTITY_PLAYER_MODEL);
-                            Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
+                            uint32_t ent_id_u = (uint32_t)ent_id;
+                            uint8_t flag_152 = MemoryEngine::Read<uint8_t>(entity + NeoXOffsets::ENTITY_IS_AVATAR);
+                            // Verified ARM64 logic (0x100881cc0): id > 0x40000000 or avatar flag or movement hook
+                            bool is_player = (ent_id_u > 0x40000000) || (flag_152 != 0) || s_CachedEntityPositions.count(ent_id);
 
-                            if (s_CachedEntityPositions.count(ent_id)) {
-                                pos = s_CachedEntityPositions[ent_id].pos;
-                            }
+                            if (is_player) {
+                                Vector3 pos = MemoryEngine::Read<Vector3>(entity + NeoXOffsets::ENTITY_COORDS);
 
-                            // Strict player validation: must have valid 3D coordinate and character model
-                            if (pos.Length() > 1.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f &&
-                                (MemoryEngine::IsValidAddress(player_model) || s_CachedEntityPositions.count(ent_id))) {
+                                if (s_CachedEntityPositions.count(ent_id)) {
+                                    pos = s_CachedEntityPositions[ent_id].pos;
+                                }
 
-                                RosPlayer p{};
-                                p.instance = entity;
-                                p.id = ent_id;
-                                p.position = pos;
-                                p.health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
-                                p.max_health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
-                                p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
-                                p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
-                                p.is_bot = MemoryEngine::Read<bool>(entity + NeoXOffsets::ENTITY_IS_BOT);
+                                if (pos.Length() > 1.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
+                                    RosPlayer p{};
+                                    p.instance = entity;
+                                    p.id = ent_id;
+                                    p.position = pos;
+                                    p.health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
+                                    p.max_health = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
+                                    p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
+                                    p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
+                                    p.is_bot = (ent_id_u <= 0x40000000);
 
-                                if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
-                                if (p.health <= 0 || p.health > p.max_health) p.health = 100;
+                                    if (p.max_health <= 0 || p.max_health > 500) p.max_health = 100;
+                                    if (p.health <= 0 || p.health > p.max_health) p.health = 100;
 
-                                float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
-                                p.distance = dist;
+                                    float dist = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
+                                    p.distance = dist;
 
-                                if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
-                                    snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
-
-                                    p.has_bones = false;
-                                    if (MemoryEngine::IsValidAddress(player_model)) {
-                                        uintptr_t bone_array = MemoryEngine::Read<uintptr_t>(player_model + NeoXOffsets::SKELETAL_BONE_ARRAY);
-                                        if (MemoryEngine::IsValidAddress(bone_array)) {
-                                            for (int b = 0; b < BONE_COUNT; ++b) {
-                                                p.bones[b] = MemoryEngine::Read<Vector3>(bone_array + (b * sizeof(Vector3)));
-                                            }
-                                            p.has_bones = true;
-                                        }
+                                    if (dist <= g_Cheat.max_esp_distance || g_Cheat.max_esp_distance <= 0.0f) {
+                                        snprintf(p.name, sizeof(p.name), "%s", p.is_bot ? "[BOT] Patrol" : "Survivor");
+                                        p.has_bones = false;
+                                        out_players.push_back(p);
                                     }
-                                    out_players.push_back(p);
                                 }
                             }
                         }
@@ -559,7 +582,6 @@ public:
         if (out_players.empty() && !s_CachedEntityPositions.empty()) {
             for (const auto& kv : s_CachedEntityPositions) {
                 if (kv.first == local_id) continue;
-                if (s_FrameCount - kv.second.tick > 600) continue;
                 if (kv.second.pos.Length() < 1.0f) continue;
 
                 RosPlayer p{};
@@ -570,10 +592,10 @@ public:
                 p.max_health = 100;
                 p.team_id = 999;
                 p.stance = 0;
-                p.is_bot = false;
+                p.is_bot = ((uint32_t)kv.first <= 0x40000000);
                 p.has_bones = false;
                 p.distance = (out_local_pos.Length() > 0.1f) ? (p.position - out_local_pos).Length() : 0.0f;
-                snprintf(p.name, sizeof(p.name), "Survivor #%d", kv.first);
+                snprintf(p.name, sizeof(p.name), "%s #%d", p.is_bot ? "[BOT]" : "Survivor", kv.first);
                 out_players.push_back(p);
             }
         }
