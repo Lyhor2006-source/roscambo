@@ -75,12 +75,15 @@ namespace NeoXOffsets {
 
     // CameraBase Matrix Offsets:
     constexpr uintptr_t NEOX_CAMERA_VIEW           = 0x40;      // Mat4 _view (64 bytes)
-    constexpr uintptr_t NEOX_CAMERA_PROJ           = 0x80;      // Mat4 _projection (64 bytes)
-    constexpr uintptr_t NEOX_CAMERA_VIEW_PROJ      = 0xC0;      // Mat4 _viewProjection (64 bytes, 0x1010a9eb8)
-    constexpr uintptr_t NEOX_CAMERA_VIEW_PROJ_INV  = 0x140;     // Mat4 _viewProjectionInverse (64 bytes)
+    constexpr uintptr_t NEOX_CAMERA_PROJ           = 0x200;     // Mat4 _projection (64 bytes)
+    constexpr uintptr_t NEOX_CAMERA_VIEW_PROJ      = 0x240;     // Mat4 _viewProjection (64 bytes, updated by 0x1010a93e4)
+    constexpr uintptr_t NEOX_CAMERA_RAW_PROJ       = 0xC0;      // Mat4 _rawProjection (64 bytes, 0x1010a9eb8)
+    constexpr uintptr_t NEOX_CAMERA_VIEW_PROJ_INV  = 0x340;     // Mat4 _viewProjectionInverse (64 bytes)
     constexpr uintptr_t NEOX_CAMERA_NEAR           = 0x394;     // float near
-    constexpr uintptr_t NEOX_CAMERA_FAR            = 0x398;     // float far
+    constexpr uintptr_t NEOX_CAMERA_FAR            = 0x398;     // float far (also aspect ratio at 0x398)
     constexpr uintptr_t NEOX_CAMERA_FOV            = 0x39C;     // float fov
+    constexpr uintptr_t NEOX_CAMERA_IS_ORTHO       = 0x380;     // uint8_t is_ortho
+    constexpr uintptr_t NEOX_CAMERA_PROJ_Y         = 0xD4;      // float cot(fov_y / 2)
 
     // cocos2d::Camera & Globals (2D / UI fallback):
     constexpr uintptr_t CAMERA_GLOBAL_POOL         = 0x44CA8F0; // Camera::_visitingCamera in __DATA (0x100cff278 / 0x100e8a590)
@@ -232,6 +235,23 @@ public:
 
 class ProjectionEngine {
 public:
+    static inline uintptr_t s_ActiveCameraPtr = 0;
+
+    static bool IsValidCameraBase(uintptr_t cam) {
+        if (!cam || !MemoryEngine::IsValidAddress(cam)) return false;
+        // View matrix at +0x40 must have non-zero rotation/scale
+        float m00 = MemoryEngine::Read<float>(cam + 0x40);
+        float m11 = MemoryEngine::Read<float>(cam + 0x54);
+        float m22 = MemoryEngine::Read<float>(cam + 0x68);
+        if (std::isnan(m00) || std::isnan(m11) || std::isnan(m22)) return false;
+        float diag_sum = std::abs(m00) + std::abs(m11) + std::abs(m22);
+        if (diag_sum < 0.1f) return false;
+        // Projection value at 0xD4 (cot(fov/2)) must be reasonable
+        float proj_y = MemoryEngine::Read<float>(cam + 0xD4);
+        if (std::isnan(proj_y) || proj_y < 0.2f || proj_y > 20.0f) return false;
+        return true;
+    }
+
     static bool IsValidViewProjMatrix(const Matrix4x4& vp) {
         float sum_sq = 0.0f;
         for (int r = 0; r < 4; ++r) {
@@ -264,8 +284,55 @@ public:
         return true;
     }
 
-    static bool WorldToScreen(const Vector3& world, Vector2& screen, const Matrix4x4& vp, float screen_w, float screen_h) {
-        // Try row-major perspective projection
+    static bool WorldToScreen(const Vector3& world, Vector2& screen, const Matrix4x4& vp, float screen_w, float screen_h, uintptr_t camera_ptr = 0) {
+        uintptr_t cam = camera_ptr ? camera_ptr : s_ActiveCameraPtr;
+        if (cam && MemoryEngine::IsValidAddress(cam)) {
+            // Priority 1: Direct NeoX CameraBase transformation (verified ARM64 0x1010aa0e4)
+            struct Vector4 { float x, y, z, w; };
+            Vector4 q2 = MemoryEngine::Read<Vector4>(cam + 0x40);
+            Vector4 q3 = MemoryEngine::Read<Vector4>(cam + 0x50);
+            Vector4 q4 = MemoryEngine::Read<Vector4>(cam + 0x60);
+            Vector4 q5 = MemoryEngine::Read<Vector4>(cam + 0x70);
+
+            float cam_x = q2.x * world.x + q3.x * world.y + q4.x * world.z + q5.x;
+            float cam_y = q2.y * world.x + q3.y * world.y + q4.y * world.z + q5.y;
+            float cam_z = q2.z * world.x + q3.z * world.y + q4.z * world.z + q5.z;
+
+            if (cam_z > 0.05f) {
+                uint8_t is_ortho = MemoryEngine::Read<uint8_t>(cam + 0x380);
+                if (!is_ortho) {
+                    float half_h = screen_h * 0.5f;
+                    float half_w = screen_w * 0.5f;
+                    float proj_y = MemoryEngine::Read<float>(cam + 0xD4);
+                    float aspect = MemoryEngine::Read<float>(cam + 0x398);
+
+                    if (std::abs(aspect) > 0.0001f && std::abs(proj_y) > 0.0001f) {
+                        float s6 = proj_y * half_h;
+                        float s7 = s6 * cam_x * screen_w;
+                        float s2 = cam_z * screen_h * aspect;
+
+                        screen.x = half_w + (s7 / s2);
+                        screen.y = half_h - (s6 * cam_y / cam_z);
+
+                        return (screen.x >= -300.0f && screen.x <= screen_w + 300.0f &&
+                                screen.y >= -300.0f && screen.y <= screen_h + 300.0f);
+                    }
+                } else {
+                    float half_h = screen_h * 0.5f;
+                    float half_w = screen_w * 0.5f;
+                    float ortho_w = MemoryEngine::Read<float>(cam + 0x38C);
+                    float ortho_h = MemoryEngine::Read<float>(cam + 0x390);
+                    if (std::abs(ortho_w) > 0.0001f && std::abs(ortho_h) > 0.0001f) {
+                        screen.x = half_w + (screen_w * cam_x / ortho_w);
+                        screen.y = half_h - (screen_h * cam_y / ortho_h);
+                        return (screen.x >= -300.0f && screen.x <= screen_w + 300.0f &&
+                                screen.y >= -300.0f && screen.y <= screen_h + 300.0f);
+                    }
+                }
+            }
+        }
+
+        // Priority 2: Standard row-major perspective projection
         float w = world.x * vp.m[0][3] + world.y * vp.m[1][3] + world.z * vp.m[2][3] + vp.m[3][3];
         if (w >= 0.05f) {
             float x = world.x * vp.m[0][0] + world.y * vp.m[1][0] + world.z * vp.m[2][0] + vp.m[3][0];
@@ -282,7 +349,7 @@ public:
                     screen.y >= -200.0f && screen.y <= screen_h + 200.0f);
         }
 
-        // Try column-major transpose
+        // Priority 3: Column-major transpose projection
         float w2 = world.x * vp.m[3][0] + world.y * vp.m[3][1] + world.z * vp.m[3][2] + vp.m[3][3];
         if (w2 >= 0.05f) {
             float x = world.x * vp.m[0][0] + world.y * vp.m[0][1] + world.z * vp.m[0][2] + vp.m[0][3];

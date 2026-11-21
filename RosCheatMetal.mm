@@ -427,16 +427,17 @@ static uintptr_t ScanHeapForCamera(uintptr_t base) {
                         uintptr_t vt = ptrs[p];
                         if (vt == neox_camerabase_vt) {
                             uintptr_t cam = cur + p * sizeof(uintptr_t);
-                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
-                            if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                            if (ProjectionEngine::IsValidCameraBase(cam)) {
                                 return cam; // Exact 3D Gameplay Camera!
                             }
                         } else if (vt == neox_worldcam_vt) {
                             uintptr_t wcam = cur + p * sizeof(uintptr_t);
-                            uintptr_t base_cam = MemoryEngine::Read<uintptr_t>(wcam + 0x40);
+                            uintptr_t base_cam = MemoryEngine::Read<uintptr_t>(wcam + 0x70);
+                            if (!MemoryEngine::IsValidAddress(base_cam)) {
+                                base_cam = MemoryEngine::Read<uintptr_t>(wcam + 0x40);
+                            }
                             if (MemoryEngine::IsValidAddress(base_cam) && MemoryEngine::Read<uintptr_t>(base_cam) == neox_camerabase_vt) {
-                                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(base_cam + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
-                                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                if (ProjectionEngine::IsValidCameraBase(base_cam)) {
                                     return base_cam;
                                 }
                             }
@@ -483,15 +484,22 @@ public:
         if (s_ActiveCamera && MemoryEngine::IsValidAddress(s_ActiveCamera)) {
             uintptr_t vt = MemoryEngine::Read<uintptr_t>(s_ActiveCamera);
             if (vt == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
-                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
-                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
-                    out_vp = cam_vp;
-                    Matrix4x4 view_mat = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::NEOX_CAMERA_VIEW);
-                    if (std::abs(view_mat.m[0][0]) > 0.0001f || std::abs(view_mat.m[2][0]) > 0.0001f) {
-                        out_camera_yaw = atan2f(view_mat.m[0][2], view_mat.m[2][2]);
+                if (ProjectionEngine::IsValidCameraBase(s_ActiveCamera)) {
+                    ProjectionEngine::s_ActiveCameraPtr = s_ActiveCamera;
+                    Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
+                    if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                        out_vp = cam_vp;
+                    } else {
+                        out_vp = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::NEOX_CAMERA_RAW_PROJ);
+                    }
+                    float m20 = MemoryEngine::Read<float>(s_ActiveCamera + 0x60);
+                    float m22 = MemoryEngine::Read<float>(s_ActiveCamera + 0x68);
+                    if (std::abs(m20) > 0.0001f || std::abs(m22) > 0.0001f) {
+                        out_camera_yaw = atan2f(m20, m22);
                     }
                 } else {
                     s_ActiveCamera = 0;
+                    ProjectionEngine::s_ActiveCameraPtr = 0;
                 }
             } else if (vt == base + NeoXOffsets::CAMERA_VTABLE) {
                 Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::CAMERA_VIEW_PROJ);
@@ -521,19 +529,24 @@ public:
                 if (MemoryEngine::IsValidAddress(candidate)) {
                     uintptr_t vt = MemoryEngine::Read<uintptr_t>(candidate);
                     if (vt == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
-                        Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(candidate + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
-                        if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                        if (ProjectionEngine::IsValidCameraBase(candidate)) {
                             s_ActiveCamera = candidate;
-                            out_vp = cam_vp;
+                            ProjectionEngine::s_ActiveCameraPtr = candidate;
+                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(candidate + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
+                            out_vp = ProjectionEngine::IsValidViewProjMatrix(cam_vp) ? cam_vp : MemoryEngine::Read<Matrix4x4>(candidate + NeoXOffsets::NEOX_CAMERA_RAW_PROJ);
                             break;
                         }
                     } else if (vt == base + NeoXOffsets::NEOX_WORLDCAMERA_VTABLE) {
-                        uintptr_t base_cam = MemoryEngine::Read<uintptr_t>(candidate + 0x40);
+                        uintptr_t base_cam = MemoryEngine::Read<uintptr_t>(candidate + 0x70);
+                        if (!MemoryEngine::IsValidAddress(base_cam)) {
+                            base_cam = MemoryEngine::Read<uintptr_t>(candidate + 0x40);
+                        }
                         if (MemoryEngine::IsValidAddress(base_cam) && MemoryEngine::Read<uintptr_t>(base_cam) == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
-                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(base_cam + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
-                            if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                            if (ProjectionEngine::IsValidCameraBase(base_cam)) {
                                 s_ActiveCamera = base_cam;
-                                out_vp = cam_vp;
+                                ProjectionEngine::s_ActiveCameraPtr = base_cam;
+                                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(base_cam + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
+                                out_vp = ProjectionEngine::IsValidViewProjMatrix(cam_vp) ? cam_vp : MemoryEngine::Read<Matrix4x4>(base_cam + NeoXOffsets::NEOX_CAMERA_RAW_PROJ);
                                 break;
                             }
                         }
@@ -594,9 +607,18 @@ public:
 
         // Camera Yaw extraction from active camera view matrix
         if (s_ActiveCamera && MemoryEngine::IsValidAddress(s_ActiveCamera)) {
-            Matrix4x4 view_mat = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::CAMERA_VIEW);
-            if (std::abs(view_mat.m[0][0]) > 0.0001f || std::abs(view_mat.m[2][0]) > 0.0001f) {
-                out_camera_yaw = atan2f(view_mat.m[0][2], view_mat.m[2][2]);
+            uintptr_t vt = MemoryEngine::Read<uintptr_t>(s_ActiveCamera);
+            if (vt == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
+                float m20 = MemoryEngine::Read<float>(s_ActiveCamera + 0x60);
+                float m22 = MemoryEngine::Read<float>(s_ActiveCamera + 0x68);
+                if (std::abs(m20) > 0.0001f || std::abs(m22) > 0.0001f) {
+                    out_camera_yaw = atan2f(m20, m22);
+                }
+            } else {
+                Matrix4x4 view_mat = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::CAMERA_VIEW);
+                if (std::abs(view_mat.m[0][0]) > 0.0001f || std::abs(view_mat.m[2][0]) > 0.0001f) {
+                    out_camera_yaw = atan2f(view_mat.m[0][2], view_mat.m[2][2]);
+                }
             }
         }
 
@@ -826,6 +848,10 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& in_players, co
             uint16_t cam_flag = 0;
             if (cam_vt == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
                 cam_desc = "NeoX::CameraBase (3D)";
+                float proj_y = MemoryEngine::Read<float>(s_ActiveCamera + 0xD4);
+                float aspect = MemoryEngine::Read<float>(s_ActiveCamera + 0x398);
+                uint8_t is_ortho = MemoryEngine::Read<uint8_t>(s_ActiveCamera + 0x380);
+                [log appendFormat:@"Camera NeoX: ProjY=%.4f, Aspect=%.4f, Ortho=%u\n", proj_y, aspect, (unsigned)is_ortho];
             } else if (cam_vt == base + NeoXOffsets::NEOX_WORLDCAMERA_VTABLE) {
                 cam_desc = "NeoX::WorldCamera";
             } else if (cam_vt == base + NeoXOffsets::CAMERA_VTABLE) {
@@ -856,8 +882,8 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& in_players, co
             size_t idx = 0;
             for (const auto& p : players) {
                 Vector2 screen_head, screen_feet;
-                bool w2s_head = ProjectionEngine::WorldToScreen(p.head_pos, screen_head, vp, screenSize.width, screenSize.height);
-                bool w2s_feet = ProjectionEngine::WorldToScreen(p.position, screen_feet, vp, screenSize.width, screenSize.height);
+                bool w2s_head = ProjectionEngine::WorldToScreen(p.head_pos, screen_head, vp, screenSize.width, screenSize.height, s_ActiveCamera);
+                bool w2s_feet = ProjectionEngine::WorldToScreen(p.position, screen_feet, vp, screenSize.width, screenSize.height, s_ActiveCamera);
 
                 [log appendFormat:@"[%02zu] ID:%d | Inst:0x%lx | Bot:%d | HP:%d/%d | Dist:%.1fm\n",
                  idx++, p.id, p.instance, p.is_bot ? 1 : 0, p.health, p.max_health, p.distance];
@@ -1345,8 +1371,8 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 head_3d = player.bones[BONE_HEAD];
             }
 
-            bool head_w2s = ProjectionEngine::WorldToScreen(head_3d, head_screen, vp_matrix, screenSize.width, screenSize.height);
-            bool feet_w2s = ProjectionEngine::WorldToScreen(player.position, feet_screen, vp_matrix, screenSize.width, screenSize.height);
+            bool head_w2s = ProjectionEngine::WorldToScreen(head_3d, head_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
+            bool feet_w2s = ProjectionEngine::WorldToScreen(player.position, feet_screen, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera);
 
             if (&player == &players[0]) {
                 g_TelemetryW2S_X = head_screen.x;
@@ -1365,7 +1391,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
             if (box_h < 10.0f) box_h = 10.0f;
             float box_w = box_h * 0.52f;
             float box_x = head_screen.x - (box_w * 0.5f);
-            float box_y = head_screen.y;
+            float box_y = std::min(head_screen.y, feet_screen.y);
 
             ImU32 box_color = player.is_bot ? IM_COL32(255, 180, 0, 255) : IM_COL32(255, 40, 40, 255);
 
@@ -1416,8 +1442,8 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 ImU32 skel_col = IM_COL32(0, 220, 255, 230);
                 for (int i = 0; i < kSkeletonJointCount; ++i) {
                     Vector2 s1, s2;
-                    if (ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].from], s1, vp_matrix, screenSize.width, screenSize.height) &&
-                        ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].to], s2, vp_matrix, screenSize.width, screenSize.height)) {
+                    if (ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].from], s1, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera) &&
+                        ProjectionEngine::WorldToScreen(player.bones[kSkeletonJoints[i].to], s2, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
                         draw->AddLine(ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), skel_col, g_Cheat.skeleton_thickness);
                     }
                 }
@@ -1432,7 +1458,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
                 }
 
                 Vector2 target_2d;
-                if (ProjectionEngine::WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height)) {
+                if (ProjectionEngine::WorldToScreen(target_3d, target_2d, vp_matrix, screenSize.width, screenSize.height, s_ActiveCamera)) {
                     float dist_center = (target_2d - center).Length();
                     if (dist_center < closest_aim_dist) {
                         closest_aim_dist = dist_center;
