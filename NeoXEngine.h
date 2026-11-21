@@ -63,8 +63,26 @@ namespace NeoXOffsets {
     constexpr uintptr_t DIRECTOR_GLOBAL_PTR       = 0x3A66CD8; // cocos2d::Director::getInstance() (0x100ed1e20)
     constexpr uintptr_t LOCAL_PLAYER_MGR_PTR       = 0x39AB428; // Local Player Manager singleton (0x10089a794)
     constexpr uintptr_t CLIENTAPP_GLOBAL_PTR       = 0x37819F0; // Exact ClientApp pointer in __DATA (from 0x100883c48: ldr x0, [base + 0x37819F0])
+    constexpr uintptr_t D3DDEVICE_GLOBAL_PTR       = 0x3A68940; // neox::render::D3DDevice::getInstance() (0x1010aa450)
+    constexpr uintptr_t NEOX_RENDERER_GLOBAL_PTR   = 0x44C9B18; // NeoX Graphics/Renderer singleton in __DATA
+    constexpr uintptr_t NEOX_CAMERA_GLOBAL_1       = 0x44CA458; // Global 3D camera pointer in __DATA (0x100c22630)
+    constexpr uintptr_t NEOX_CAMERA_GLOBAL_2       = 0x44CA460; // Global 3D camera pointer in __DATA (0x100c22654)
 
-    // cocos2d::Camera & Globals:
+    // NeoX 3D Cameras (Rules of Survival Gameplay Engine):
+    constexpr uintptr_t NEOX_CAMERABASE_VTABLE     = 0x34609A8; // Exact verified vtable for neox::render::CameraBase (0x1010a80dc)
+    constexpr uintptr_t NEOX_WORLDCAMERA_VTABLE    = 0x33F0DD0; // Exact verified vtable for neox::world::Camera (0x100a818c4)
+    constexpr uintptr_t NEOX_BASECAMERA_VTABLE     = 0x33D8D28; // Exact verified vtable for neox::bwclient::BaseCamera
+
+    // CameraBase Matrix Offsets:
+    constexpr uintptr_t NEOX_CAMERA_VIEW           = 0x40;      // Mat4 _view (64 bytes)
+    constexpr uintptr_t NEOX_CAMERA_PROJ           = 0x80;      // Mat4 _projection (64 bytes)
+    constexpr uintptr_t NEOX_CAMERA_VIEW_PROJ      = 0xC0;      // Mat4 _viewProjection (64 bytes, 0x1010a9eb8)
+    constexpr uintptr_t NEOX_CAMERA_VIEW_PROJ_INV  = 0x140;     // Mat4 _viewProjectionInverse (64 bytes)
+    constexpr uintptr_t NEOX_CAMERA_NEAR           = 0x394;     // float near
+    constexpr uintptr_t NEOX_CAMERA_FAR            = 0x398;     // float far
+    constexpr uintptr_t NEOX_CAMERA_FOV            = 0x39C;     // float fov
+
+    // cocos2d::Camera & Globals (2D / UI fallback):
     constexpr uintptr_t CAMERA_GLOBAL_POOL         = 0x44CA8F0; // Camera::_visitingCamera in __DATA (0x100cff278 / 0x100e8a590)
     constexpr uintptr_t CAMERA_VTABLE              = 0x341BD48; // Exact verified vtable for cocos2d::Camera in __DATA (from constructor 0x100e48b64)
 

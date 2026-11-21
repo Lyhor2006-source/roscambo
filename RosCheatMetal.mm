@@ -392,10 +392,12 @@ static uintptr_t ScanHeapForClientApp(uintptr_t base) {
     return 0;
 }
 
-// Direct Heap Scanner for cocos2d::Camera instance (matches vtable base + CAMERA_VTABLE: 0x341BD48)
+// Direct Heap Scanner for NeoX 3D CameraBase (vtable: 0x34609A8) and fallback cocos2d::Camera (0x341BD48)
 static uintptr_t ScanHeapForCamera(uintptr_t base) {
     if (!base) return 0;
-    uintptr_t expected_vtable = base + NeoXOffsets::CAMERA_VTABLE;
+    uintptr_t neox_camerabase_vt = base + NeoXOffsets::NEOX_CAMERABASE_VTABLE;
+    uintptr_t neox_worldcam_vt = base + NeoXOffsets::NEOX_WORLDCAMERA_VTABLE;
+    uintptr_t cocos_camera_vt = base + NeoXOffsets::CAMERA_VTABLE;
 
     vm_address_t address = 0;
     vm_size_t size = 0;
@@ -422,16 +424,27 @@ static uintptr_t ScanHeapForCamera(uintptr_t base) {
                     size_t n_ptrs = bytes_read / sizeof(uintptr_t);
                     uintptr_t* ptrs = (uintptr_t*)buf;
                     for (size_t p = 0; p < n_ptrs; ++p) {
-                        if (ptrs[p] == expected_vtable) {
+                        uintptr_t vt = ptrs[p];
+                        if (vt == neox_camerabase_vt) {
                             uintptr_t cam = cur + p * sizeof(uintptr_t);
-                            uint16_t flag = MemoryEngine::Read<uint16_t>(cam + NeoXOffsets::CAMERA_FLAG);
-                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::CAMERA_VIEW_PROJ);
+                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(cam + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
                             if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
-                                if (flag != 1) { // 3D User Camera
-                                    return cam;
-                                } else if (fallback_cam == 0) {
-                                    fallback_cam = cam;
+                                return cam; // Exact 3D Gameplay Camera!
+                            }
+                        } else if (vt == neox_worldcam_vt) {
+                            uintptr_t wcam = cur + p * sizeof(uintptr_t);
+                            uintptr_t base_cam = MemoryEngine::Read<uintptr_t>(wcam + 0x40);
+                            if (MemoryEngine::IsValidAddress(base_cam) && MemoryEngine::Read<uintptr_t>(base_cam) == neox_camerabase_vt) {
+                                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(base_cam + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
+                                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                    return base_cam;
                                 }
+                            }
+                        } else if (vt == cocos_camera_vt && fallback_cam == 0) {
+                            uintptr_t ccam = cur + p * sizeof(uintptr_t);
+                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(ccam + NeoXOffsets::CAMERA_VIEW_PROJ);
+                            if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                fallback_cam = ccam;
                             }
                         }
                     }
@@ -469,33 +482,67 @@ public:
         // Priority 1: Check existing cached camera
         if (s_ActiveCamera && MemoryEngine::IsValidAddress(s_ActiveCamera)) {
             uintptr_t vt = MemoryEngine::Read<uintptr_t>(s_ActiveCamera);
-            if (vt == base + NeoXOffsets::CAMERA_VTABLE) {
+            if (vt == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
+                Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
+                if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                    out_vp = cam_vp;
+                    Matrix4x4 view_mat = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::NEOX_CAMERA_VIEW);
+                    if (std::abs(view_mat.m[0][0]) > 0.0001f || std::abs(view_mat.m[2][0]) > 0.0001f) {
+                        out_camera_yaw = atan2f(view_mat.m[0][2], view_mat.m[2][2]);
+                    }
+                } else {
+                    s_ActiveCamera = 0;
+                }
+            } else if (vt == base + NeoXOffsets::CAMERA_VTABLE) {
                 Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::CAMERA_VIEW_PROJ);
                 if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
                     out_vp = cam_vp;
+                    Matrix4x4 view_mat = MemoryEngine::Read<Matrix4x4>(s_ActiveCamera + NeoXOffsets::CAMERA_VIEW);
+                    if (std::abs(view_mat.m[0][0]) > 0.0001f || std::abs(view_mat.m[2][0]) > 0.0001f) {
+                        out_camera_yaw = atan2f(view_mat.m[0][2], view_mat.m[2][2]);
+                    }
+                } else {
+                    s_ActiveCamera = 0;
                 }
             } else {
                 s_ActiveCamera = 0;
             }
         }
 
-        // Priority 2: Direct static pointer to Camera::_visitingCamera in __DATA (base + 0x44CA8F0)
+        // Priority 2: Direct static pointers in __DATA
         if (!ProjectionEngine::IsValidViewProjMatrix(out_vp)) {
-            uintptr_t visiting = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::CAMERA_GLOBAL_POOL);
-            if (MemoryEngine::IsValidAddress(visiting)) {
-                uintptr_t vt = MemoryEngine::Read<uintptr_t>(visiting);
-                if (vt == base + NeoXOffsets::CAMERA_VTABLE) {
-                    uint16_t flag = MemoryEngine::Read<uint16_t>(visiting + NeoXOffsets::CAMERA_FLAG);
-                    Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(visiting + NeoXOffsets::CAMERA_VIEW_PROJ);
-                    if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
-                        s_ActiveCamera = visiting;
-                        out_vp = cam_vp;
+            uintptr_t static_cam_ptrs[] = {
+                base + NeoXOffsets::NEOX_CAMERA_GLOBAL_1,
+                base + NeoXOffsets::NEOX_CAMERA_GLOBAL_2,
+                base + NeoXOffsets::CAMERA_GLOBAL_POOL
+            };
+            for (uintptr_t ptr_addr : static_cam_ptrs) {
+                uintptr_t candidate = MemoryEngine::Read<uintptr_t>(ptr_addr);
+                if (MemoryEngine::IsValidAddress(candidate)) {
+                    uintptr_t vt = MemoryEngine::Read<uintptr_t>(candidate);
+                    if (vt == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
+                        Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(candidate + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
+                        if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                            s_ActiveCamera = candidate;
+                            out_vp = cam_vp;
+                            break;
+                        }
+                    } else if (vt == base + NeoXOffsets::NEOX_WORLDCAMERA_VTABLE) {
+                        uintptr_t base_cam = MemoryEngine::Read<uintptr_t>(candidate + 0x40);
+                        if (MemoryEngine::IsValidAddress(base_cam) && MemoryEngine::Read<uintptr_t>(base_cam) == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
+                            Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(base_cam + NeoXOffsets::NEOX_CAMERA_VIEW_PROJ);
+                            if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
+                                s_ActiveCamera = base_cam;
+                                out_vp = cam_vp;
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Priority 3: cocos2d::Director -> Scene -> Cameras (verified from 0x100e48658 Camera::getDefaultCamera)
+        // Priority 3: cocos2d::Director -> Scene -> Cameras fallback
         if (!ProjectionEngine::IsValidViewProjMatrix(out_vp)) {
             uintptr_t director_ptr = MemoryEngine::Read<uintptr_t>(base + NeoXOffsets::DIRECTOR_GLOBAL_PTR);
             if (MemoryEngine::IsValidAddress(director_ptr)) {
@@ -504,7 +551,6 @@ public:
                     scene_ptr = MemoryEngine::Read<uintptr_t>(director_ptr + 0x1A0); // fallback offset
                 }
                 if (MemoryEngine::IsValidAddress(scene_ptr)) {
-                    // Check Scene + 0x238 (exact _defaultCamera slot from 0x100e48664)
                     uintptr_t sc_cam = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_DEFAULT_CAMERA);
                     if (MemoryEngine::IsValidAddress(sc_cam) && MemoryEngine::Read<uintptr_t>(sc_cam) == base + NeoXOffsets::CAMERA_VTABLE) {
                         Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(sc_cam + NeoXOffsets::CAMERA_VIEW_PROJ);
@@ -513,31 +559,23 @@ public:
                             out_vp = cam_vp;
                         }
                     }
-                    // Check Scene::_cameras vector (begin: 0x220, end: 0x228)
-                    if (!ProjectionEngine::IsValidViewProjMatrix(out_vp)) {
-                        uintptr_t cam_begin = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_BEGIN);
-                        uintptr_t cam_end = MemoryEngine::Read<uintptr_t>(scene_ptr + NeoXOffsets::SCENE_CAMERAS_END);
-                        if (MemoryEngine::IsValidAddress(cam_begin) && MemoryEngine::IsValidAddress(cam_end) && cam_end >= cam_begin && (cam_end - cam_begin) <= 32 * sizeof(uintptr_t)) {
-                            for (uintptr_t p = cam_begin; p < cam_end; p += sizeof(uintptr_t)) {
-                                uintptr_t c = MemoryEngine::Read<uintptr_t>(p);
-                                if (MemoryEngine::IsValidAddress(c) && MemoryEngine::Read<uintptr_t>(c) == base + NeoXOffsets::CAMERA_VTABLE) {
-                                    Matrix4x4 cam_vp = MemoryEngine::Read<Matrix4x4>(c + NeoXOffsets::CAMERA_VIEW_PROJ);
-                                    if (ProjectionEngine::IsValidViewProjMatrix(cam_vp)) {
-                                        s_ActiveCamera = c;
-                                        out_vp = cam_vp;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
 
-        // Priority 4: Heap scan for Camera vtable (base + 0x341C308)
-        // NOTE: NEVER run synchronous heap scan on the Metal render thread! That blocks the GPU pipeline and tanks FPS.
-        // Camera heap scan is executed on-demand via USB command 'SCAN' or background worker.
+        // Priority 4: Background asynchronous heap scanner (NEVER blocks render loop!)
+        static std::atomic<bool> s_IsScanningCamera{false};
+        if (!s_ActiveCamera && !s_IsScanningCamera.load()) {
+            s_IsScanningCamera.store(true);
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                uintptr_t found_cam = ScanHeapForCamera(base);
+                if (found_cam) {
+                    s_ActiveCamera = found_cam;
+                    NSLog(@"[RosCambo] Background scan resolved 3D CameraBase at 0x%lx", found_cam);
+                }
+                s_IsScanningCamera.store(false);
+            });
+        }
 
         // 2. Resolve ClientApp:
         // Priority 1: Verified static pointer at base + 0x37819F0 (0x100883c48: ldr x0, [base + 0x37819F0])
@@ -621,20 +659,17 @@ public:
                     pos = s_CachedEntityPositions[ent_id].pos;
                 }
 
-                if (pos.Length() > 5.0f && std::abs(pos.x) < 20000.0f && std::abs(pos.z) < 20000.0f) {
+                if (pos.Length() >= 1.0f && std::abs(pos.x) < 25000.0f && std::abs(pos.z) < 25000.0f) {
+                    if (ent_id <= 0) return;
                     int raw_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_HP);
                     int raw_max_hp = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_MAX_HP);
-                    // Discard invalid / lobby memory garbage
-                    if (raw_max_hp < 1 || raw_max_hp > 500) return;
-                    if (raw_hp < 0 || raw_hp > raw_max_hp + 50) return;
-                    if (ent_id <= 0) return;
 
                     RosPlayer p{};
                     p.instance = entity;
                     p.id = ent_id;
                     p.position = pos;
-                    p.health = (raw_hp <= 0) ? 100 : raw_hp;
-                    p.max_health = (raw_max_hp <= 0) ? 100 : raw_max_hp;
+                    p.health = (raw_hp > 0 && raw_hp <= 500) ? raw_hp : 100;
+                    p.max_health = (raw_max_hp > 0 && raw_max_hp <= 500) ? raw_max_hp : 100;
                     p.team_id = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_TEAM);
                     p.stance = MemoryEngine::Read<int>(entity + NeoXOffsets::ENTITY_STANCE);
                     p.is_bot = ((uint32_t)ent_id <= 0x40000000);
@@ -737,7 +772,15 @@ public:
 static std::string s_LatestDebugReport = "";
 static std::mutex s_DebugReportMutex;
 
-static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const Vector3& local_pos, int local_team, const Matrix4x4& vp, float camera_yaw, CGSize screenSize, bool is_manual_dump = false) {
+static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& in_players, const Vector3& in_local_pos, int in_local_team, const Matrix4x4& in_vp, float in_camera_yaw, CGSize in_screenSize, bool is_manual_dump = false) {
+    // Make deep copies of stack variables BEFORE GCD async dispatch!
+    std::vector<RosPlayer> players = in_players;
+    Vector3 local_pos = in_local_pos;
+    int local_team = in_local_team;
+    Matrix4x4 vp = in_vp;
+    float camera_yaw = in_camera_yaw;
+    CGSize screenSize = in_screenSize;
+
     // Copy data to background worker queue so Metal rendering never drops a single frame
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         @autoreleasepool {
@@ -778,9 +821,18 @@ static void DumpGameplayDebugToFile(const std::vector<RosPlayer>& players, const
             }
 
             [log appendFormat:@"\n--- CAMERA & PROJECTION ---\n"];
-            uint16_t cam_flag = s_ActiveCamera ? MemoryEngine::Read<uint16_t>(s_ActiveCamera + NeoXOffsets::CAMERA_FLAG) : 0;
             uintptr_t cam_vt = s_ActiveCamera ? MemoryEngine::Read<uintptr_t>(s_ActiveCamera) : 0;
-            [log appendFormat:@"Active Camera: 0x%lx (Flag: %u, VTable: 0x%lx)\n", s_ActiveCamera, cam_flag, cam_vt];
+            const char* cam_desc = "None";
+            uint16_t cam_flag = 0;
+            if (cam_vt == base + NeoXOffsets::NEOX_CAMERABASE_VTABLE) {
+                cam_desc = "NeoX::CameraBase (3D)";
+            } else if (cam_vt == base + NeoXOffsets::NEOX_WORLDCAMERA_VTABLE) {
+                cam_desc = "NeoX::WorldCamera";
+            } else if (cam_vt == base + NeoXOffsets::CAMERA_VTABLE) {
+                cam_desc = "Cocos2d::Camera (2D)";
+                cam_flag = MemoryEngine::Read<uint16_t>(s_ActiveCamera + NeoXOffsets::CAMERA_FLAG);
+            }
+            [log appendFormat:@"Active Camera: 0x%lx (%s, Flag: %u, VTable: 0x%lx)\n", s_ActiveCamera, cam_desc, cam_flag, cam_vt];
             [log appendFormat:@"Camera Yaw: %.4f rad (%.1f deg)\n", camera_yaw, camera_yaw * 57.2958f];
             bool vp_valid = ProjectionEngine::IsValidViewProjMatrix(vp);
             [log appendFormat:@"VP Valid: %d\n", vp_valid ? 1 : 0];
