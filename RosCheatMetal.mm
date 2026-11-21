@@ -1789,29 +1789,8 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 static __unsafe_unretained UITouch* s_ActiveImGuiTouch = nil;
 static __unsafe_unretained UITouch* s_ActiveAimTouch = nil;
 
-@interface UITouch (RosAimAssist)
-@end
-
-@implementation UITouch (RosAimAssist)
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Method origLoc = class_getInstanceMethod(self, @selector(locationInView:));
-        Method swizLoc = class_getInstanceMethod(self, @selector(ros_locationInView:));
-        method_exchangeImplementations(origLoc, swizLoc);
-    });
-}
-
-- (CGPoint)ros_locationInView:(UIView *)view {
-    CGPoint pt = [self ros_locationInView:view];
-    if (s_AimAssistActive && !g_Cheat.menu_open) {
-        float pull = (g_Cheat.aim_snap_mode == 2) ? 1.0f : ((g_Cheat.aim_snap_mode == 1) ? g_Cheat.aim_skill_ratio : 0.35f);
-        pt.x += s_ActiveAimCorrection.x * pull;
-        pt.y += s_ActiveAimCorrection.y * pull;
-    }
-    return pt;
-}
-@end
+// UITouch (RosAimAssist) swizzling permanently removed to maintain 100% clean UIKit touch integrity.
+// Aimbot is smoothly handled via NeoX camera controller in RosGameBridge & RyomenPayload.
 
 @implementation UIWindow (RosTouchHook)
 + (void)load {
