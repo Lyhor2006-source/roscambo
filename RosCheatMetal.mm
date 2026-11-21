@@ -814,7 +814,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        static __weak id<CAMetalDrawable> s_LastRendered = nil;
+        static id<CAMetalDrawable> s_LastRendered = nil;
         if (s_LastRendered != metalDrawable) {
             s_LastRendered = metalDrawable;
             id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
@@ -830,7 +830,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        static __weak id<CAMetalDrawable> s_LastRendered = nil;
+        static id<CAMetalDrawable> s_LastRendered = nil;
         if (s_LastRendered != metalDrawable) {
             s_LastRendered = metalDrawable;
             id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
@@ -846,7 +846,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
 - (void)ros_presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
     if (drawable && [drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        static __weak id<CAMetalDrawable> s_LastRendered = nil;
+        static id<CAMetalDrawable> s_LastRendered = nil;
         if (s_LastRendered != metalDrawable) {
             s_LastRendered = metalDrawable;
             id<MTLCommandBuffer> cmdBuffer = (id<MTLCommandBuffer>)self;
