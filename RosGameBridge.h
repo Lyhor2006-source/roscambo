@@ -92,6 +92,9 @@ public:
     static bool ResolvePythonAPI() {
         if (s_PythonFound.load()) return true;
 
+        uintptr_t base = MemoryEngine::GetBaseAddress();
+        if (!base) return false;
+
         s_Py_IsInitialized  = (Py_IsInitialized_t)dlsym(RTLD_DEFAULT, "Py_IsInitialized");
         s_PyGILState_Ensure = (PyGILState_Ensure_t)dlsym(RTLD_DEFAULT, "PyGILState_Ensure");
         s_PyGILState_Release= (PyGILState_Release_t)dlsym(RTLD_DEFAULT, "PyGILState_Release");
@@ -100,26 +103,21 @@ public:
         s_PyRun_StringFlags = (PyRun_StringFlags_t)dlsym(RTLD_DEFAULT, "PyRun_StringFlags");
         s_PyErr_Clear       = (PyErr_Clear_t)dlsym(RTLD_DEFAULT, "PyErr_Clear");
 
-        if (s_Py_IsInitialized && s_PyGILState_Ensure && s_PyGILState_Release && s_PyRun_StringFlags) {
-            s_PythonFound.store(true);
-            return true;
-        }
+        // Rules of Survival client binary strips dynamic export symbols.
+        // Fallback to exact, verified internal Python runtime offsets from binary analysis:
+        if (!s_Py_IsInitialized)   s_Py_IsInitialized   = (Py_IsInitialized_t)(base + 0x1d05a24);
+        if (!s_PyGILState_Ensure)  s_PyGILState_Ensure  = (PyGILState_Ensure_t)(base + 0x1d05158);
+        if (!s_PyGILState_Release) s_PyGILState_Release = (PyGILState_Release_t)(base + 0x1d051dc);
+        if (!s_PyImport_AddModule) s_PyImport_AddModule = (PyImport_AddModule_t)(base + 0x1cf8fd4);
+        if (!s_PyModule_GetDict)   s_PyModule_GetDict   = (PyModule_GetDict_t)(base + 0x1c79884);
+        if (!s_PyRun_StringFlags)  s_PyRun_StringFlags  = (PyRun_StringFlags_t)(base + 0x1d0689c);
+        if (!s_PyErr_Clear)        s_PyErr_Clear        = (PyErr_Clear_t)(base + 0x1cf17f0);
 
-        // Secondary search: check Mach-O base image export table
-        uintptr_t base = MemoryEngine::GetBaseAddress();
-        if (base) {
-            // Known relative offsets for Python in client binary if stripped
-            uintptr_t p_is_init = base + 0x1d05a24;
-            uintptr_t p_run_str = base + 0x1d0689c;
-            if (MemoryEngine::IsValidAddress(p_is_init) && MemoryEngine::IsValidAddress(p_run_str)) {
-                if (!s_Py_IsInitialized) s_Py_IsInitialized = (Py_IsInitialized_t)p_is_init;
-                if (!s_PyRun_StringFlags) s_PyRun_StringFlags = (PyRun_StringFlags_t)p_run_str;
-            }
-        }
+        bool all_valid = (s_Py_IsInitialized && s_PyGILState_Ensure && s_PyGILState_Release &&
+                          s_PyImport_AddModule && s_PyModule_GetDict && s_PyRun_StringFlags && s_PyErr_Clear);
 
-        bool ok = (s_Py_IsInitialized && s_PyRun_StringFlags);
-        s_PythonFound.store(ok);
-        return ok;
+        s_PythonFound.store(all_valid);
+        return all_valid;
     }
 
     static void InitializeDirectories() {
@@ -142,10 +140,21 @@ public:
 
     static bool TryInjectPayload() {
         if (s_BridgeInjected.load()) return true;
+
+        // Rate-limit injection attempts to once every 2 seconds
+        static uint64_t s_LastAttemptMs = 0;
+        uint64_t now_ms = (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000.0);
+        if (now_ms - s_LastAttemptMs < 2000) {
+            return false;
+        }
+        s_LastAttemptMs = now_ms;
+
         if (!ResolvePythonAPI()) return false;
 
-        if (s_Py_IsInitialized && !s_Py_IsInitialized()) {
-            return false; // Wait until game initializes Python runtime
+        // CRITICAL: Ensure game engine has initialized its Python runtime before calling it
+        if (!s_Py_IsInitialized || s_Py_IsInitialized() == 0) {
+            NSLog(@"[RosGameBridge] Waiting for game Python initialization...");
+            return false;
         }
 
         InitializeDirectories();
@@ -161,17 +170,31 @@ public:
 
         std::string full_script = init_prefix + kRyomenPythonPayload;
 
-        int gil = 0;
-        if (s_PyGILState_Ensure) gil = s_PyGILState_Ensure();
+        // Safely acquire Python Global Interpreter Lock (GIL)
+        int gil = s_PyGILState_Ensure();
 
-        void* main_mod = s_PyImport_AddModule ? s_PyImport_AddModule("__main__") : nullptr;
-        void* globals_dict = (main_mod && s_PyModule_GetDict) ? s_PyModule_GetDict(main_mod) : nullptr;
+        void* main_mod = s_PyImport_AddModule("__main__");
+        if (!main_mod) {
+            if (s_PyErr_Clear) s_PyErr_Clear();
+            s_PyGILState_Release(gil);
+            NSLog(@"[RosGameBridge] Failed to get __main__ module");
+            return false;
+        }
+
+        void* globals_dict = s_PyModule_GetDict(main_mod);
+        if (!globals_dict) {
+            if (s_PyErr_Clear) s_PyErr_Clear();
+            s_PyGILState_Release(gil);
+            NSLog(@"[RosGameBridge] Failed to get module dictionary");
+            return false;
+        }
 
         // 257 = Py_file_input
         void* res = s_PyRun_StringFlags(full_script.c_str(), 257, globals_dict, globals_dict, nullptr);
         if (s_PyErr_Clear) s_PyErr_Clear();
 
-        if (s_PyGILState_Release) s_PyGILState_Release(gil);
+        // Release GIL
+        s_PyGILState_Release(gil);
 
         if (res != nullptr) {
             s_BridgeInjected.store(true);
@@ -179,10 +202,11 @@ public:
             return true;
         }
 
+        NSLog(@"[RosGameBridge] Python payload execution returned null");
         return false;
     }
 
-    // Push 40 floating point control options to aim_cfg.txt
+    // Push 40 floating point control options to aim_cfg.txt (throttled to 4Hz)
     static void PushConfig(
         bool aim_en, int aim_mode, float aim_fov, float aim_smooth, float aim_power,
         bool vis_chk, bool ign_knock, int aim_bone, float screen_w, float screen_h, float max_dist,
@@ -192,6 +216,15 @@ public:
         bool wallhack, bool no_fall, bool fly, bool underground,
         bool no_grass, bool fast_para, bool wide_cam, bool clear_fog, bool no_recoil)
     {
+        if (!s_BridgeInjected.load()) return;
+
+        static uint64_t s_LastPushMs = 0;
+        uint64_t now_ms = (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000.0);
+        if (now_ms - s_LastPushMs < 250) {
+            return;
+        }
+        s_LastPushMs = now_ms;
+
         InitializeDirectories();
 
         char buf[512];
@@ -241,6 +274,8 @@ public:
 
     // Read atomic ros_esp.txt snapshot produced by Python BigWorld.callback
     static bool FetchSnapshot(BridgeSnapshot& out_snapshot) {
+        if (!s_BridgeInjected.load()) return false;
+
         InitializeDirectories();
 
         FILE* f = std::fopen(s_EspPath.c_str(), "r");
