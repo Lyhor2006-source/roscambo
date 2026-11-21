@@ -251,7 +251,6 @@ static getEntity_t s_OrigGetEntity = nullptr;
 
 static uintptr_t s_CapturedEntityManager = 0;
 static uintptr_t s_ActiveCamera = 0;
-static Vector2 s_ActiveAimCorrection = { 0.0f, 0.0f };
 static int s_CapturedLocalId = -1;
 static uint64_t s_MoveHookHits = 0;
 static uint64_t s_CreateHookHits = 0;
