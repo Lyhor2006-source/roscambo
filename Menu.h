@@ -81,6 +81,11 @@ namespace Menu
 // Runtime Telemetry exports for Menu integration
 extern void*               g_MenuAvatarTexture;
 extern unsigned long long  g_TelemetryClientApp;
+extern unsigned long long  g_TelemetryActiveCamera;
+extern unsigned int        g_TelemetryCameraFlag;
+extern bool                g_TelemetryVpValid;
+extern float               g_TelemetryW2S_X;
+extern float               g_TelemetryW2S_Y;
 extern unsigned long long  g_TelemetryMoveHits;
 extern unsigned long long  g_TelemetryCreateHits;
 extern unsigned long long  g_TelemetryCachedPositions;

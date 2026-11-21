@@ -6,6 +6,11 @@
 // Define telemetry variables
 void*               g_MenuAvatarTexture = nullptr;
 unsigned long long  g_TelemetryClientApp = 0;
+unsigned long long  g_TelemetryActiveCamera = 0;
+unsigned int        g_TelemetryCameraFlag = 0;
+bool                g_TelemetryVpValid = false;
+float               g_TelemetryW2S_X = 0.0f;
+float               g_TelemetryW2S_Y = 0.0f;
 unsigned long long  g_TelemetryMoveHits = 0;
 unsigned long long  g_TelemetryCreateHits = 0;
 unsigned long long  g_TelemetryCachedPositions = 0;
@@ -413,6 +418,9 @@ namespace Menu
         Section("ROSCAMBO ENGINE TELEMETRY");
         Toggle("Ghillie SpaceData Synced", &cfg.ghillieSpaceData);
         ImGui::TextColored(g_accent, "ClientApp: 0x%llx", g_TelemetryClientApp);
+        ImGui::Text("Active Camera: 0x%llx (Flag: %u)", g_TelemetryActiveCamera, g_TelemetryCameraFlag);
+        ImGui::Text("VP 3D Valid: %s", g_TelemetryVpValid ? "YES (3D Perspective)" : "NO (Searching...)");
+        ImGui::Text("Target 0 W2S: (%.1f, %.1f)", g_TelemetryW2S_X, g_TelemetryW2S_Y);
         ImGui::Text("Hook Hits (Move: %llu | Create: %llu)", g_TelemetryMoveHits, g_TelemetryCreateHits);
         ImGui::Text("Cached Positions: %llu", g_TelemetryCachedPositions);
         ImGui::Text("Entities Loaded: %llu", g_TelemetryEntitiesLoaded);

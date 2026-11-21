@@ -63,7 +63,10 @@ namespace NeoXOffsets {
     constexpr uintptr_t DIRECTOR_GLOBAL_PTR       = 0x3A66CD8; // cocos2d::Director::getInstance() (0x100ed1e20)
     constexpr uintptr_t LOCAL_PLAYER_MGR_PTR       = 0x39AB428; // Local Player Manager singleton (0x10089a794)
     constexpr uintptr_t CLIENTAPP_GLOBAL_PTR       = 0x37819F0; // Exact ClientApp pointer in __DATA (from 0x100883c48: ldr x0, [base + 0x37819F0])
-    constexpr uintptr_t CAMERA_GLOBAL_POOL         = 0x44CA9E0; // std::vector<Camera*> pool (0x100ec8a38)
+
+    // cocos2d::Camera & Globals:
+    constexpr uintptr_t CAMERA_GLOBAL_POOL         = 0x44CA8F0; // Camera::_visitingCamera in __DATA (0x100cff278 / 0x100e8a590)
+    constexpr uintptr_t CAMERA_VTABLE              = 0x341C308; // Exact vtable for cocos2d::Camera in __DATA (0x100e495ec / 0x100e49808)
 
     // cocos2d::Director & Scene:
     constexpr uintptr_t DIRECTOR_RUNNING_SCENE     = 0x1A0;     // Director::_runningScene (0x100ed33bc: ldr x0, [x0, #0x1a0])
@@ -221,6 +224,24 @@ public:
             }
         }
         if (sum_sq < 0.5f) return false;
+
+        // A valid 3D perspective projection matrix cannot have an entire row or column of all zeros!
+        for (int r = 0; r < 4; ++r) {
+            float row_sum = std::abs(vp.m[r][0]) + std::abs(vp.m[r][1]) + std::abs(vp.m[r][2]) + std::abs(vp.m[r][3]);
+            if (row_sum < 0.0001f) return false;
+        }
+        for (int c = 0; c < 4; ++c) {
+            float col_sum = std::abs(vp.m[0][c]) + std::abs(vp.m[1][c]) + std::abs(vp.m[2][c]) + std::abs(vp.m[3][c]);
+            if (col_sum < 0.0001f) return false;
+        }
+
+        // Perspective W component must have non-zero depth coefficients:
+        // In row-major, col 3 defines w: (m[0][3], m[1][3], m[2][3])
+        // In col-major, row 3 defines w: (m[3][0], m[3][1], m[3][2])
+        float w_row_len = std::abs(vp.m[0][3]) + std::abs(vp.m[1][3]) + std::abs(vp.m[2][3]);
+        float w_col_len = std::abs(vp.m[3][0]) + std::abs(vp.m[3][1]) + std::abs(vp.m[3][2]);
+        if (w_row_len < 0.01f && w_col_len < 0.01f) return false;
+
         return true;
     }
 
