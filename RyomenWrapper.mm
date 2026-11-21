@@ -13,7 +13,7 @@ static void (*orig_drawInMTKView)(id self, SEL _cmd, MTKView *view) = NULL;
 static BOOL (*orig_drawViewHierarchyInRect)(id self, SEL _cmd, CGRect rect, BOOL afterUpdates) = NULL;
 static UIView* (*orig_snapshotViewAfterScreenUpdates)(id self, SEL _cmd, BOOL afterUpdates) = NULL;
 
-static __weak UIView *g_ryomenOverlayView = nil;
+static UIView *g_ryomenOverlayView = nil;
 
 // ----------------------------------------------------------------------------
 // 1. Hook drawInMTKView: on RyomenXOverlayView
