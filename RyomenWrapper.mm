@@ -32,17 +32,16 @@ static UIView *g_ryomenOverlayView = nil;
 static void ApplyStreamProofToLayer(CALayer *layer) {
     if (!layer) return;
     
-    const unsigned int mask = 0x12; // (1 << 1) | (1 << 4)
+    const unsigned int mask = 0x12; // (1 << 1) | (1 << 4) -> 0x02 (Screenshots) | 0x10 (Screen Recordings)
     
     SEL setMaskSel = sel_registerName("setDisableUpdateMask:");
     if ([layer respondsToSelector:setMaskSel]) {
         typedef void (*SetMaskFunc)(id, SEL, unsigned int);
         ((SetMaskFunc)objc_msgSend)(layer, setMaskSel, mask);
-    } else {
-        @try {
-            [layer setValue:@(mask) forKey:@"disableUpdateMask"];
-        } @catch (id ex) {}
     }
+    @try {
+        [layer setValue:@(mask) forKey:@"disableUpdateMask"];
+    } @catch (id ex) {}
     
     for (CALayer *sub in layer.sublayers) {
         ApplyStreamProofToLayer(sub);
@@ -59,23 +58,19 @@ static void hooked_drawInMTKView(id self, SEL _cmd, MTKView *view) {
         g_ryomenOverlayView = (UIView *)self;
     }
     
-    // Refresh StreamProof mask on CAMetalLayer and sublayers
+    // Refresh StreamProof hardware mask on CAMetalLayer, window, and sublayers
     if (view && view.layer) {
         ApplyStreamProofToLayer(view.layer);
+        if (view.window) {
+            ApplyStreamProofToLayer(view.window.layer);
+        }
     }
     
-    // Active Screen Recording / AirPlay / QuickTime Check
-    if (@available(iOS 11.0, *)) {
-        if ([UIScreen mainScreen].isCaptured) {
-            if (!view.hidden) {
-                view.hidden = YES;
-            }
-            return; // Skip rendering frame while being captured
-        } else {
-            if (view.hidden) {
-                view.hidden = NO;
-            }
-        }
+    // Hardware StreamProof (disableUpdateMask 0x12) masks the overlay at the
+    // display compositor level for video recordings and screenshots automatically.
+    // The view MUST remain visible on the physical display for real-time play!
+    if (view.hidden) {
+        view.hidden = NO;
     }
     
     if (orig_drawInMTKView) {
@@ -99,6 +94,9 @@ static void hooked_addSubview(id self, SEL _cmd, UIView *subview) {
             NSLog(@"[RosCambo] Intercepted RyomenXOverlayView added to window (%@)", [self class]);
             g_ryomenOverlayView = subview;
             ApplyStreamProofToLayer(subview.layer);
+            if (subview.window) {
+                ApplyStreamProofToLayer(subview.window.layer);
+            }
         }
     }
 }
@@ -197,9 +195,13 @@ static void InitRyomenWrapper() {
                                                            queue:[NSOperationQueue mainQueue] 
                                                       usingBlock:^(NSNotification *note) {
             BOOL captured = [UIScreen mainScreen].isCaptured;
-            NSLog(@"[RosCambo] UIScreen captured state changed: %d", captured);
+            NSLog(@"[RosCambo] UIScreen captured state changed: %d (keeping real-time display visible, hardware mask active)", captured);
             if (g_ryomenOverlayView) {
-                g_ryomenOverlayView.hidden = captured;
+                g_ryomenOverlayView.hidden = NO;
+                ApplyStreamProofToLayer(g_ryomenOverlayView.layer);
+                if (g_ryomenOverlayView.window) {
+                    ApplyStreamProofToLayer(g_ryomenOverlayView.window.layer);
+                }
             }
         }];
     }

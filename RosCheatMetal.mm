@@ -1367,13 +1367,7 @@ static void RenderRosCamboOverlay(id<MTLCommandBuffer> commandBuffer, id<CAMetal
     Menu::Config& cfg = Menu::Cfg();
 
     // Stream-Proof Anti-Screen Recording & QuickTime / AirPlay Protection
-    if (cfg.antiRecord) {
-        if (@available(iOS 11.0, *)) {
-            if ([UIScreen mainScreen].isCaptured) {
-                return;
-            }
-        }
-    }
+    // (Hardware stream-proof mask is maintained without hiding from real-time display)
     g_Cheat.esp_enabled = cfg.espEnabled;
     g_Cheat.esp_box = cfg.espBox;
     g_Cheat.esp_box_type = cfg.espBoxStyle;
