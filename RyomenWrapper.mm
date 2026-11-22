@@ -2,6 +2,7 @@
 // RosCambo - RyomenX Anti-Record & Hardware StreamProof Stealth Wrapper
 // Target: Rules of Survival (ROS Hariki) iOS arm64
 // Features: Hardware Screen Recording Masking + Hardware Screenshot Masking +
+//           CoreAnimation disableUpdateMask (0x12) + Secure Canvas Extraction +
 //           In-Game Anti-Cheat Screenshot Hooking + Capture State Fallback
 // ============================================================================
 
@@ -9,6 +10,7 @@
 #import <UIKit/UIKit.h>
 #import <MetalKit/MetalKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dlfcn.h>
 
 // Forward function pointers
@@ -19,61 +21,119 @@ static void (*orig_addSubview)(id self, SEL _cmd, UIView *subview) = NULL;
 static void (*orig_bringSubviewToFront)(id self, SEL _cmd, UIView *subview) = NULL;
 static BOOL (*orig_drawViewHierarchyInRect)(id self, SEL _cmd, CGRect rect, BOOL afterUpdates) = NULL;
 static UIView* (*orig_snapshotViewAfterScreenUpdates)(id self, SEL _cmd, BOOL afterUpdates) = NULL;
+static void (*orig_renderInContext)(id self, SEL _cmd, CGContextRef ctx) = NULL;
 
 // Global references (MRC - non-ARC)
 static Class g_overlayClass = Nil;
 static UIView *g_targetWindow = nil;
 static UIView *g_ryomenOverlayView = nil;
+static UIView *g_secureCanvas = nil;
+static UITextField *g_seedTextField = nil;
 
 // ----------------------------------------------------------------------------
-// Secure Text Field Subclass for Hardware DRM Masking
+// CoreAnimation Hardware DRM Masking (disableUpdateMask = 0x12)
+// Bit 1 (1 << 1 = 0x2): Mask during ALL Screenshots (Power + Volume Up, SpringBoard)
+// Bit 4 (1 << 4 = 0x10): Mask during ALL Screen Recordings (ReplayKit, Control Center)
 // ----------------------------------------------------------------------------
-@interface RosSecureTextField : UITextField
-@end
-
-@implementation RosSecureTextField
-
-- (BOOL)canBecomeFirstResponder {
-    return NO;
-}
-
-- (BOOL)becomeFirstResponder {
-    return NO;
-}
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self) {
-        return nil; // Ignore touches on the container background so game receives them
-    }
-    return hit;
-}
-
-@end
-
-static RosSecureTextField *g_secureTextField = nil;
-
-// ----------------------------------------------------------------------------
-// Resolve the internal iOS Secure Canvas (_UITextLayoutCanvasView)
-// ----------------------------------------------------------------------------
-static UIView* GetSecureCanvas(RosSecureTextField *field) {
-    if (!field) return nil;
-    [field setNeedsLayout];
-    [field layoutIfNeeded];
+static void ApplyStreamProofToLayer(CALayer *layer) {
+    if (!layer) return;
     
-    // Look for canvas subview created by iOS for secureTextEntry
-    for (UIView *sub in field.subviews) {
+    const unsigned int mask = 0x12; // (1 << 1) | (1 << 4)
+    
+    SEL setMaskSel = sel_registerName("setDisableUpdateMask:");
+    if ([layer respondsToSelector:setMaskSel]) {
+        ((void(*)(id, SEL, unsigned int))objc_msgSend)(layer, setMaskSel, mask);
+    }
+    
+    @try {
+        [layer setValue:@(mask) forKey:@"disableUpdateMask"];
+    } @catch (id ex) {}
+    
+    @try {
+        [layer setValue:@YES forKey:@"disableProcessAssertion"];
+    } @catch (id ex) {}
+
+    @try {
+        [layer setValue:@YES forKey:@"disableScreenRecording"];
+    } @catch (id ex) {}
+    
+    for (CALayer *sub in layer.sublayers) {
+        ApplyStreamProofToLayer(sub);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Hardware Secure Canvas Extraction (_UITextLayoutCanvasView)
+// ----------------------------------------------------------------------------
+static UIView* GetOrCreateSecureCanvas(UIView *targetWindow) {
+    if (!targetWindow) return nil;
+    if (g_secureCanvas && g_secureCanvas.superview == targetWindow) {
+        return g_secureCanvas;
+    }
+    
+    if (!g_seedTextField) {
+        g_seedTextField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 10, 10)];
+        g_seedTextField.backgroundColor = [UIColor clearColor];
+        g_seedTextField.secureTextEntry = YES;
+        g_seedTextField.userInteractionEnabled = NO;
+        g_seedTextField.text = @"\u200B"; // zero-width space forces UIKit canvas creation
+        
+        if (orig_addSubview) {
+            orig_addSubview(targetWindow, @selector(addSubview:), g_seedTextField);
+        } else {
+            [targetWindow addSubview:g_seedTextField];
+        }
+        [g_seedTextField setNeedsLayout];
+        [g_seedTextField layoutIfNeeded];
+    }
+    
+    UIView *extracted = nil;
+    for (UIView *sub in g_seedTextField.subviews) {
         NSString *cls = NSStringFromClass([sub class]);
-        if ([cls containsString:@"Canvas"]) {
-            sub.userInteractionEnabled = YES;
-            return sub;
+        if ([cls containsString:@"Canvas"] || [cls containsString:@"Content"]) {
+            extracted = sub;
+            break;
         }
     }
-    if (field.subviews.count > 0) {
-        UIView *first = field.subviews.firstObject;
-        first.userInteractionEnabled = YES;
-        return first;
+    if (!extracted && g_seedTextField.subviews.count > 0) {
+        extracted = g_seedTextField.subviews.firstObject;
     }
+    
+    if (extracted) {
+        [extracted removeFromSuperview];
+        extracted.frame = targetWindow.bounds;
+        extracted.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        extracted.userInteractionEnabled = YES;
+        
+        // Swizzle hitTest on extracted canvas class dynamically so touches pass through background
+        Class canvasCls = [extracted class];
+        static Class s_swizzledCanvasCls = Nil;
+        if (canvasCls != s_swizzledCanvasCls) {
+            s_swizzledCanvasCls = canvasCls;
+            Method m = class_getInstanceMethod(canvasCls, @selector(hitTest:withEvent:));
+            if (m) {
+                IMP origHit = method_getImplementation(m);
+                IMP newHit = imp_implementationWithBlock(^UIView*(UIView *selfView, CGPoint pt, UIEvent *ev) {
+                    UIView *hit = ((UIView*(*)(id, SEL, CGPoint, UIEvent*))origHit)(selfView, @selector(hitTest:withEvent:), pt, ev);
+                    if (hit == selfView) {
+                        return nil; // Pass touches through to game underneath
+                    }
+                    return hit;
+                });
+                method_setImplementation(m, newHit);
+            }
+        }
+        
+        if (orig_addSubview) {
+            orig_addSubview(targetWindow, @selector(addSubview:), extracted);
+        } else {
+            [targetWindow addSubview:extracted];
+        }
+        g_secureCanvas = extracted;
+        NSLog(@"[RosCambo] Secure canvas (%@) attached to targetWindow!", [extracted class]);
+        return extracted;
+    }
+    
     return nil;
 }
 
@@ -83,30 +143,8 @@ static UIView* GetSecureCanvas(RosSecureTextField *field) {
 static void AttachOverlayToSecureContainer(UIView *targetWindow, UIView *overlayView) {
     if (!targetWindow || !overlayView) return;
     
-    if (!g_secureTextField) {
-        g_secureTextField = [[RosSecureTextField alloc] initWithFrame:targetWindow.bounds];
-        g_secureTextField.backgroundColor = [UIColor clearColor];
-        g_secureTextField.secureTextEntry = YES;
-        g_secureTextField.userInteractionEnabled = YES;
-        g_secureTextField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        
-        if (orig_addSubview) {
-            orig_addSubview(targetWindow, @selector(addSubview:), g_secureTextField);
-        } else {
-            [targetWindow addSubview:g_secureTextField];
-        }
-        if (orig_bringSubviewToFront) {
-            orig_bringSubviewToFront(targetWindow, @selector(bringSubviewToFront:), g_secureTextField);
-        } else {
-            [targetWindow bringSubviewToFront:g_secureTextField];
-        }
-    }
-    
-    [g_secureTextField setNeedsLayout];
-    [g_secureTextField layoutIfNeeded];
-    
-    UIView *canvas = GetSecureCanvas(g_secureTextField);
-    UIView *mountTarget = canvas ? canvas : g_secureTextField;
+    UIView *canvas = GetOrCreateSecureCanvas(targetWindow);
+    UIView *mountTarget = canvas ? canvas : targetWindow;
     
     if (overlayView.superview != mountTarget) {
         [overlayView removeFromSuperview];
@@ -117,7 +155,13 @@ static void AttachOverlayToSecureContainer(UIView *targetWindow, UIView *overlay
         } else {
             [mountTarget addSubview:overlayView];
         }
-        NSLog(@"[RosCambo] Attached RyomenXOverlayView to Secure Canvas (%@)!", [mountTarget class]);
+        NSLog(@"[RosCambo] Overlay mounted inside (%@)!", [mountTarget class]);
+    }
+    
+    // Apply CoreAnimation streamproof mask to overlay view & canvas
+    ApplyStreamProofToLayer(overlayView.layer);
+    if (canvas) {
+        ApplyStreamProofToLayer(canvas.layer);
     }
 }
 
@@ -136,10 +180,10 @@ static UIView* hooked_superview(id self, SEL _cmd) {
     return nil;
 }
 
-// 2. setFrame: Keep secureTextField matching window bounds
+// 2. setFrame: Keep secureCanvas matching window bounds
 static void hooked_setFrame(id self, SEL _cmd, CGRect frame) {
-    if (g_secureTextField && g_targetWindow) {
-        g_secureTextField.frame = g_targetWindow.bounds;
+    if (g_secureCanvas && g_targetWindow) {
+        g_secureCanvas.frame = g_targetWindow.bounds;
     }
     if (orig_setFrame) {
         orig_setFrame(self, _cmd, frame);
@@ -152,16 +196,21 @@ static void hooked_drawInMTKView(id self, SEL _cmd, MTKView *view) {
         g_ryomenOverlayView = (UIView *)self;
     }
     
+    // Ensure streamproof mask is continuously refreshed on CAMetalLayer and all sublayers
+    if (view && view.layer) {
+        ApplyStreamProofToLayer(view.layer);
+    }
+    
     // Ensure overlay remains anchored inside the secure container
-    if (g_secureTextField && g_targetWindow && view) {
-        UIView *canvas = GetSecureCanvas(g_secureTextField);
-        UIView *mountTarget = canvas ? canvas : g_secureTextField;
+    if (g_targetWindow && view) {
+        UIView *canvas = GetOrCreateSecureCanvas(g_targetWindow);
+        UIView *mountTarget = canvas ? canvas : g_targetWindow;
         if (view.superview != mountTarget) {
             AttachOverlayToSecureContainer(g_targetWindow, (UIView *)view);
         }
     }
     
-    // Fallback: If hardware screen recording is active, completely hide overlay
+    // Active Screen Recording Check (Control Center / ReplayKit / AirPlay / QuickTime)
     if (@available(iOS 11.0, *)) {
         if ([UIScreen mainScreen].isCaptured) {
             if (!view.hidden) {
@@ -199,8 +248,8 @@ static void hooked_addSubview(id self, SEL _cmd, UIView *subview) {
 
 static void hooked_bringSubviewToFront(id self, SEL _cmd, UIView *subview) {
     if (subview && g_overlayClass && [subview isKindOfClass:g_overlayClass]) {
-        if (g_secureTextField) {
-            orig_bringSubviewToFront(self, _cmd, g_secureTextField);
+        if (g_secureCanvas) {
+            orig_bringSubviewToFront(self, @selector(bringSubviewToFront:), g_secureCanvas);
         }
         return;
     }
@@ -215,9 +264,9 @@ static void hooked_bringSubviewToFront(id self, SEL _cmd, UIView *subview) {
 
 static BOOL hooked_drawViewHierarchyInRect(id self, SEL _cmd, CGRect rect, BOOL afterUpdates) {
     BOOL wasHidden = NO;
-    if (g_secureTextField) {
-        wasHidden = g_secureTextField.hidden;
-        g_secureTextField.hidden = YES;
+    if (g_secureCanvas) {
+        wasHidden = g_secureCanvas.hidden;
+        g_secureCanvas.hidden = YES;
     }
     if (g_ryomenOverlayView) {
         g_ryomenOverlayView.hidden = YES;
@@ -228,8 +277,8 @@ static BOOL hooked_drawViewHierarchyInRect(id self, SEL _cmd, CGRect rect, BOOL 
         result = orig_drawViewHierarchyInRect(self, _cmd, rect, afterUpdates);
     }
     
-    if (g_secureTextField) {
-        g_secureTextField.hidden = wasHidden;
+    if (g_secureCanvas) {
+        g_secureCanvas.hidden = wasHidden;
     }
     if (g_ryomenOverlayView) {
         g_ryomenOverlayView.hidden = wasHidden;
@@ -239,9 +288,9 @@ static BOOL hooked_drawViewHierarchyInRect(id self, SEL _cmd, CGRect rect, BOOL 
 
 static UIView* hooked_snapshotViewAfterScreenUpdates(id self, SEL _cmd, BOOL afterUpdates) {
     BOOL wasHidden = NO;
-    if (g_secureTextField) {
-        wasHidden = g_secureTextField.hidden;
-        g_secureTextField.hidden = YES;
+    if (g_secureCanvas) {
+        wasHidden = g_secureCanvas.hidden;
+        g_secureCanvas.hidden = YES;
     }
     if (g_ryomenOverlayView) {
         g_ryomenOverlayView.hidden = YES;
@@ -252,13 +301,31 @@ static UIView* hooked_snapshotViewAfterScreenUpdates(id self, SEL _cmd, BOOL aft
         result = orig_snapshotViewAfterScreenUpdates(self, _cmd, afterUpdates);
     }
     
-    if (g_secureTextField) {
-        g_secureTextField.hidden = wasHidden;
+    if (g_secureCanvas) {
+        g_secureCanvas.hidden = wasHidden;
     }
     if (g_ryomenOverlayView) {
         g_ryomenOverlayView.hidden = wasHidden;
     }
     return result;
+}
+
+static void hooked_renderInContext(id self, SEL _cmd, CGContextRef ctx) {
+    CALayer *l = (CALayer *)self;
+    id val = nil;
+    @try { val = [l valueForKey:@"disableUpdateMask"]; } @catch (id ex) {}
+    if (val && [val intValue] != 0) {
+        return; // Suppressed by streamproof mask!
+    }
+    if (g_ryomenOverlayView && self == g_ryomenOverlayView.layer) {
+        return;
+    }
+    if (g_secureCanvas && self == g_secureCanvas.layer) {
+        return;
+    }
+    if (orig_renderInContext) {
+        orig_renderInContext(self, _cmd, ctx);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -291,13 +358,15 @@ static void SwizzleMethod(Class cls, SEL origSel, IMP newImp, IMP *origImp) {
 // ----------------------------------------------------------------------------
 __attribute__((constructor))
 static void InitRyomenWrapper() {
-    NSLog(@"[RosCambo] Initializing RyomenX Hardware StreamProof & Anti-Record Wrapper...");
+    NSLog(@"[RosCambo] Initializing RyomenX Hardware StreamProof & Anti-Record Wrapper v2...");
     
-    // 1. Hook In-game Screenshot APIs on UIView
+    // 1. Hook In-game Screenshot APIs on UIView & CALayer
     SwizzleMethod([UIView class], @selector(drawViewHierarchyInRect:afterScreenUpdates:), 
                   (IMP)hooked_drawViewHierarchyInRect, (IMP*)&orig_drawViewHierarchyInRect);
     SwizzleMethod([UIView class], @selector(snapshotViewAfterScreenUpdates:), 
                   (IMP)hooked_snapshotViewAfterScreenUpdates, (IMP*)&orig_snapshotViewAfterScreenUpdates);
+    SwizzleMethod([CALayer class], @selector(renderInContext:), 
+                  (IMP)hooked_renderInContext, (IMP*)&orig_renderInContext);
     
     // 2. Hook addSubview: and bringSubviewToFront: to trap RyomenX overlay
     SwizzleMethod([UIView class], @selector(addSubview:), 
@@ -308,16 +377,16 @@ static void InitRyomenWrapper() {
     // 3. Register screen capture state listener
     if (@available(iOS 11.0, *)) {
         [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenCapturedDidChangeNotification 
-                                                         object:nil 
-                                                          queue:[NSOperationQueue mainQueue] 
-                                                     usingBlock:^(NSNotification *note) {
+                                                          object:nil 
+                                                           queue:[NSOperationQueue mainQueue] 
+                                                      usingBlock:^(NSNotification *note) {
             BOOL captured = [UIScreen mainScreen].isCaptured;
             NSLog(@"[RosCambo] UIScreen captured state changed: %d", captured);
             if (g_ryomenOverlayView) {
                 g_ryomenOverlayView.hidden = captured;
             }
-            if (g_secureTextField) {
-                g_secureTextField.hidden = captured;
+            if (g_secureCanvas) {
+                g_secureCanvas.hidden = captured;
             }
         }];
     }
