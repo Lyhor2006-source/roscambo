@@ -18,7 +18,7 @@ endif
 
 ARCHS = -arch arm64
 
-CXXFLAGS = $(ARCHS) $(MIN_VER) $(ISYSROOT) -O3 -std=c++17 -fno-objc-arc \
+CXXFLAGS = $(ARCHS) $(MIN_VER) $(ISYSROOT) -O3 -std=c++17 -fno-objc-arc -fobjc-exceptions \
            -I. -Wall -fvisibility=hidden -DNDEBUG
 
 LDFLAGS = $(ARCHS) $(MIN_VER) $(ISYSROOT) -dynamiclib \
