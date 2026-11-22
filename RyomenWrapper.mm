@@ -32,6 +32,12 @@ static UIView *g_ryomenOverlayView = nil;
 static void ApplyStreamProofToLayer(CALayer *layer) {
     if (!layer) return;
     
+    // Hard guard: NEVER apply StreamProof mask to UIWindow or main game layers!
+    if ([layer.delegate isKindOfClass:[UIWindow class]] || 
+        [NSStringFromClass([layer class]) containsString:@"Window"]) {
+        return;
+    }
+    
     const unsigned int mask = 0x12; // (1 << 1) | (1 << 4) -> 0x02 (Screenshots) | 0x10 (Screen Recordings)
     
     SEL setMaskSel = sel_registerName("setDisableUpdateMask:");
@@ -58,12 +64,12 @@ static void hooked_drawInMTKView(id self, SEL _cmd, MTKView *view) {
         g_ryomenOverlayView = (UIView *)self;
     }
     
-    // Refresh StreamProof hardware mask on CAMetalLayer, window, and sublayers
+    // Refresh StreamProof hardware mask ONLY on the cheat's CAMetalLayer & overlay sublayers
     if (view && view.layer) {
         ApplyStreamProofToLayer(view.layer);
-        if (view.window) {
-            ApplyStreamProofToLayer(view.window.layer);
-        }
+    }
+    if (g_ryomenOverlayView && g_ryomenOverlayView != (UIView *)view && g_ryomenOverlayView.layer) {
+        ApplyStreamProofToLayer(g_ryomenOverlayView.layer);
     }
     
     // Hardware StreamProof (disableUpdateMask 0x12) masks the overlay at the
@@ -94,9 +100,9 @@ static void hooked_addSubview(id self, SEL _cmd, UIView *subview) {
             NSLog(@"[RosCambo] Intercepted RyomenXOverlayView added to window (%@)", [self class]);
             g_ryomenOverlayView = subview;
             ApplyStreamProofToLayer(subview.layer);
-            if (subview.window) {
-                ApplyStreamProofToLayer(subview.window.layer);
-            }
+        } else if (g_ryomenOverlayView && self == g_ryomenOverlayView) {
+            // Subviews added inside the cheat overlay
+            ApplyStreamProofToLayer(subview.layer);
         }
     }
 }
@@ -199,9 +205,6 @@ static void InitRyomenWrapper() {
             if (g_ryomenOverlayView) {
                 g_ryomenOverlayView.hidden = NO;
                 ApplyStreamProofToLayer(g_ryomenOverlayView.layer);
-                if (g_ryomenOverlayView.window) {
-                    ApplyStreamProofToLayer(g_ryomenOverlayView.window.layer);
-                }
             }
         }];
     }
